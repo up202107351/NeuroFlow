@@ -51,7 +51,7 @@ EEG_CHANNEL_INDICES = [0, 1, 2, 3]
 NUM_CHANNELS_USED = len(EEG_CHANNEL_INDICES)
 
 # Directory where the trained models/objects were saved
-LOAD_DIR = Path('C:/Users/berna/OneDrive/Documentos/GitHub/Projeto/saved_models')
+LOAD_DIR = Path(r'C:\Users\Utilizador\OneDrive\Documentos\GitHub\NeuroFlow\saved_models')
 
 # Filtering parameters (MUST MATCH TRAINING SCRIPT)
 FILTER_ORDER = 4
@@ -174,10 +174,10 @@ def run_realtime_prediction(model_dir):
     print(f"Loading models and preprocessing objects from: {model_dir}")
     try:
         # --- Choose ONE model ---
-        model = joblib.load(model_dir / 'knn_model.joblib')
-        model_name = "KNN"
-        # model = joblib.load(model_dir / 'logreg_model.joblib')
-        # model_name = "LogReg"
+        #model = joblib.load(model_dir / 'knn_model.joblib')
+        #model_name = "KNN"
+        model = joblib.load(model_dir / 'logreg_model.joblib')
+        model_name = "LogReg"
         # model = joblib.load(model_dir / 'svm_model.joblib')
         # model_name = "SVM"
         # --- End Model Choice ---
@@ -215,7 +215,7 @@ def run_realtime_prediction(model_dir):
     # Use NUM_CHANNELS_USED which is derived from EEG_CHANNEL_INDICES
     for i in range(NUM_CHANNELS_USED):
         p = plot_layout.addPlot(row=i, col=0)
-        p.setYRange(-80, 80) # Adjust Y range
+        p.setYRange(-500, 200) # Adjust Y range
         p.setLabel('left', f"Ch {EEG_CHANNEL_INDICES[i]}", units='uV')
         p.showGrid(x=True, y=True, alpha=0.3)
         if i < NUM_CHANNELS_USED - 1:

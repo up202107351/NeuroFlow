@@ -59,14 +59,14 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True) # Create the directory if it doesn't
 # Only active if brainflow library is installed. Set to None/0 to disable specific filters.
 ENABLE_FILTERING = True and BRAINFLOW_AVAILABLE # Master switch for filtering
 FILTER_ORDER = 5               # Filter order (Butterworth)
-NOTCH_CENTER_FREQ = 60.0       # Hz (Adjust to 50 Hz for Europe/Asia, 60Hz for N. America)
+NOTCH_CENTER_FREQ = 50.0       # Hz (Adjust to 50 Hz for Europe/Asia, 60Hz for N. America)
 NOTCH_BANDWIDTH = 4.0        # Hz (Wider might be needed for BrainFlow's Butterworth notch)
 BAND_PASS_LOW_CUTOFF = 1.0     # Hz (High-pass cutoff, set to 0 or None to disable)
 BAND_PASS_HIGH_CUTOFF = 45.0   # Hz (Low-pass cutoff, set to 0 or None to disable)
 
 # Visualization settings
-UPDATE_INTERVAL_MS = 40 # Update plot roughly every 40ms (~25 FPS)
-Y_RANGE_EEG = [-80, 80] # Plot Y-axis range in uV (adjust based on signal amplitude)
+UPDATE_INTERVAL_MS = 80 # Update plot roughly every 40ms (~25 FPS)
+Y_RANGE_EEG = [-500, 200] # Plot Y-axis range in uV (adjust based on signal amplitude)
 
 # --- Automatically calculated ---
 # We will try to get the actual sample rate from LSL, but use ASSUMED_SAMPLE_RATE for initial buffer sizing
