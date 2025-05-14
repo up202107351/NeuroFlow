@@ -10,11 +10,12 @@ import zmq # For ZeroMQ
 import json # For sending structured data
 
 try:
-    from brainflow.data_filter import DataFilter, FilterTypes
+    from brainflow.data_filter import DataFilter, FilterTypes, DetrendOperations, WindowFunctions
+    from brainflow.board_shim import BoardShim # Not for direct use here, but DataFilter might need some constants
     BRAINFLOW_AVAILABLE = True
 except ImportError:
     BRAINFLOW_AVAILABLE = False
-    print("Warning: brainflow library not found. Filtering will be disabled.")
+    print("Backend: Warning: brainflow library not found. PSD calculation will be disabled.")
 
 # --- Configuration (from your original script, adapt as needed) ---
 LSL_STREAM_TYPE = 'EEG'
@@ -37,6 +38,15 @@ ZMQ_PUB_ADDRESS = "tcp://*:5556" # Publisher binds to this address
 CLASSIFICATION_BUFFER_SECONDS = 2 # How much data to use for one classification
 CLASSIFICATION_INTERVAL_SECONDS = 0.5 # How often to try to classify
 
+# Band definitions
+ALPHA_BAND = (8.0, 13.0)
+BETA_BAND = (13.0, 30.0)
+
+# Alpha/Beta Ratio Threshold for Relaxation (NEEDS CALIBRATION/EXPERIMENTATION)
+# Higher ratio (more alpha than beta) -> more relaxed
+# This is a CRITICAL parameter to tune.
+RELAXATION_THRESHOLD_AB_RATIO = 3.0 # Example: Alpha power >= 3 * Beta power
+
 # --- Global for graceful shutdown ---
 running = True
 
@@ -53,6 +63,16 @@ class EEGProcessor:
         self.fs_int = int(self.actual_fs)
         self.classification_buffer_samples = int(self.actual_fs * self.config['CLASSIFICATION_BUFFER_SECONDS'])
         self.eeg_data_buffer = np.empty((self.config['NUM_CHANNELS_USED'], 0))
+        # Window for PSD must be <= data_window length
+        # Welch's method segments the data, so nperseg should be appropriate
+        # A common choice is a power of 2, e.g., same as sampling rate for 1s resolution
+        TARGET_FREQ_RESOLUTION = 0.5 # Hz
+        self.welch_nperseg = int(self.actual_fs / TARGET_FREQ_RESOLUTION) # e.g., 256 / 0.5 = 512 samples
+        
+        self.nfft = DataFilter.get_next_power_of_two(self.welch_nperseg) # NFFT points
+        # Calculate samples needed per segment for this resolution
+        self.welch_overlap = self.welch_nperseg // 2 # 50% overlap is common
+
         self.classifier = self.load_classifier_model() # Placeholder
 
         # ZMQ Setup
@@ -86,9 +106,15 @@ class EEGProcessor:
             self.lsl_inlet = pylsl.StreamInlet(streams[0], max_chunklen=self.config['LSL_CHUNK_MAX'])
             stream_info = self.lsl_inlet.info()
             srate = stream_info.nominal_srate()
-            if srate > 0:
+            if srate > 0 and abs(srate - self.actual_fs) > 1e-3: # If different enough
+                print(f"Backend: Updating sampling rate from {self.actual_fs:.2f} to {srate:.2f} Hz")
                 self.actual_fs = srate
                 self.fs_int = int(self.actual_fs)
+                self.welch_nperseg = int(self.actual_fs*2) # Or a different choice based on new fs_int
+                # RECALCULATE PSD PARAMS
+                self.nfft = DataFilter.get_next_power_of_two(self.welch_nperseg)
+                self.welch_overlap = self.welch_nperseg // 2
+                # Also update classification_buffer_samples
                 self.classification_buffer_samples = int(self.actual_fs * self.config['CLASSIFICATION_BUFFER_SECONDS'])
             print(f"Backend: Connected to LSL: {stream_info.name()} @ {self.actual_fs:.2f} Hz")
             return True
@@ -110,19 +136,81 @@ class EEGProcessor:
         return chunk_np
 
     def extract_features_and_classify(self, data_window):
-        # TODO: Implement your actual feature extraction and classification
-        if self.classifier is None or data_window.shape[1] < self.classification_buffer_samples:
-            return None # Not enough data or no classifier
+        # data_window shape: (n_channels, n_samples)
+        # Ensure brainflow is available and data is sufficient
+        if not BRAINFLOW_AVAILABLE:
+            print("Backend: BrainFlow not available for PSD calculation.")
+            return "Error: BrainFlow Missing"
+        if data_window.shape[1] < self.welch_nperseg: # Need at least one segment for Welch
+            # print(f"Backend: Not enough data for Welch PSD. Have {data_window.shape[1]}, need {self.welch_nperseg}")
+            return None # Not enough data yet
 
-        # Placeholder classification logic
-        activity_level = np.mean(np.std(data_window, axis=1))
-        if activity_level < 5:
+        avg_ab_ratios_per_channel = []
+
+        for i in range(data_window.shape[0]): # Iterate over each channel
+            channel_data = data_window[i, :]
+
+            # It's good practice to detrend before PSD
+            DataFilter.detrend(channel_data, DetrendOperations.CONSTANT.value) # Or LINEAR
+
+            # Calculate PSD using Welch method
+            # psd_data: [amplitudes, frequencies]
+            try:
+                psd_data = DataFilter.get_psd_welch(
+                    data=channel_data,
+                    nfft=self.nfft,
+                    nperseg=self.welch_nperseg,
+                    noverlap=self.welch_overlap,
+                    sampling_rate=int(self.actual_fs), # Ensure this is the correct, potentially updated, sampling rate
+                    window=WindowFunctions.HANNING.value # Hanning is a good general window
+                )
+            except Exception as e: # BrainFlow can raise various errors if data is problematic
+                print(f"Backend: Error calculating PSD for channel {i}: {e}")
+                continue # Skip this channel if PSD fails
+
+            # Find average power in Alpha band
+            alpha_power = DataFilter.get_band_power(
+                psd=psd_data,
+                freq_start=ALPHA_BAND[0],
+                freq_end=ALPHA_BAND[1]
+            )
+
+            # Find average power in Beta band
+            beta_power = DataFilter.get_band_power(
+                psd=psd_data,
+                freq_start=BETA_BAND[0],
+                freq_end=BETA_BAND[1]
+            )
+
+            if beta_power > 1e-10: # Avoid division by zero or very small numbers
+                ab_ratio = alpha_power / beta_power
+                avg_ab_ratios_per_channel.append(ab_ratio)
+            else:
+                # Handle cases where beta power is zero or too low
+                # Could append a very high ratio, or skip, or set to a default
+                avg_ab_ratios_per_channel.append(0) # Or some other indicator
+
+        if not avg_ab_ratios_per_channel:
+            print("Backend: Could not calculate A/B ratio for any channel.")
+            return "Error: PSD Failed"
+
+        # Combine ratios from channels (e.g., average)
+        # You might want to select specific channels known for good alpha/beta activity
+        # For example, if EEG_CHANNEL_INDICES maps to [TP9, AF7, AF8, TP10],
+        # parietal (TP9, TP10) might be better for alpha.
+        # For now, we average all selected channels' ratios.
+        overall_ab_ratio = np.mean(avg_ab_ratios_per_channel)
+        # print(f"Backend: Overall Alpha/Beta Ratio: {overall_ab_ratio:.2f}")
+
+        # Apply threshold for classification
+        if overall_ab_ratio >= self.config.get('RELAXATION_THRESHOLD_AB_RATIO', RELAXATION_THRESHOLD_AB_RATIO):
             prediction = "Relaxed"
-        elif activity_level < 15:
-            prediction = "Neutral"
         else:
-            prediction = "Agitated/Focused"
-        # print(f"Backend: Classified as {prediction} (activity: {activity_level:.2f})")
+            prediction = "Not Relaxed" # Or "Engaged", "Neutral", etc.
+
+        # For database and UI, you might want to send the ratio too
+        # self.publisher.send_json({"prediction": prediction, "ab_ratio": overall_ab_ratio})
+        # For now, just returning the label as per the existing structure
         return prediction
 
     def run(self):
@@ -198,6 +286,7 @@ if __name__ == "__main__":
         'ZMQ_PUB_ADDRESS': ZMQ_PUB_ADDRESS,
         'CLASSIFICATION_BUFFER_SECONDS': CLASSIFICATION_BUFFER_SECONDS,
         'CLASSIFICATION_INTERVAL_SECONDS': CLASSIFICATION_INTERVAL_SECONDS,
+        'RELAXATION_THRESHOLD_AB_RATIO': RELAXATION_THRESHOLD_AB_RATIO,
     }
     processor = EEGProcessor(config)
     processor.run()
