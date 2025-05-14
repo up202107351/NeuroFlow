@@ -35,8 +35,8 @@ BAND_PASS_HIGH_CUTOFF = 45.0
 ZMQ_PUB_ADDRESS = "tcp://*:5556" # Publisher binds to this address
 
 # Classification settings
-CLASSIFICATION_BUFFER_SECONDS = 2 # How much data to use for one classification
-CLASSIFICATION_INTERVAL_SECONDS = 0.5 # How often to try to classify
+CLASSIFICATION_BUFFER_SECONDS = 4 # How much data to use for one classification
+CLASSIFICATION_INTERVAL_SECONDS = 1 # How often to try to classify
 
 # Band definitions
 ALPHA_BAND = (8.0, 13.0)
