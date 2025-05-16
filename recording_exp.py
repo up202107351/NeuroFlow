@@ -1,15 +1,10 @@
 import numpy as np
 import time # For simulating time if needed, not strictly necessary for offline
-# from scipy.signal import welch # If you want to implement Welch manually
-try:
-    from brainflow.data_filter import DataFilter, FilterTypes, DetrendOperations, WindowFunctions
-    BRAINFLOW_AVAILABLE = True
-except ImportError:
-    BRAINFLOW_AVAILABLE = False
-    print("Warning: brainflow library not found. PSD calculation will be disabled.")
-    exit()
-
+import brainflow
+from brainflow.data_filter import DataFilter, FilterTypes, DetrendOperations, WindowOperations
 import matplotlib.pyplot as plt
+from scipy.signal import welch, butter, filtfilt
+plt.ion()
 
 # --- Configuration ---
 # Make these match what you'd use in your main app's backend
@@ -24,7 +19,7 @@ ANALYSIS_WINDOW_SECONDS = 2.0  # How much data to use for each PSD calculation/c
 WINDOW_SLIDE_SECONDS = 0.5   # How much the analysis window slides forward each step (for overlap)
 
 # BrainFlow PSD Parameters (match your backend)
-NFFT = DataFilter.get_next_power_of_two(int(SAMPLING_RATE))
+NFFT = DataFilter.get_nearest_power_of_two(int(SAMPLING_RATE))
 WELCH_NPERSEG = NFFT # Or int(SAMPLING_RATE * ANALYSIS_WINDOW_SECONDS) if window is long enough
 WELCH_OVERLAP = WELCH_NPERSEG // 2
 
@@ -40,17 +35,19 @@ FOCUS_BETA_THETA_RATIO_INCREASE_FACTOR = 1.2
 FOCUS_BETA_INCREASE_FACTOR = 1.15
 FOCUS_ALPHA_DECREASE_FACTOR = 0.8
 
+BRAINFLOW_AVAILABLE = True
+
 # --- Helper Functions (can be adapted from your eeg_backend_processor.py) ---
 def calculate_band_powers_for_window(data_window_channel, fs, nfft, nperseg, noverlap):
     """Calculates Theta, Alpha, Beta powers for a single channel window."""
-    if not BRAINFLOW_AVAILABLE or data_window_channel.shape[0] < nperseg:
+    if data_window_channel.shape[0] < nperseg:
         print(f"Not enough data for PSD: have {data_window_channel.shape[0]}, need {nperseg}")
         return None
 
     DataFilter.detrend(data_window_channel, DetrendOperations.CONSTANT.value)
     try:
-        psd_data = DataFilter.get_psd_welch(data_window_channel, nfft, nperseg,
-                                            noverlap, int(fs), WindowFunctions.HANNING.value)
+        psd_data = DataFilter.get_psd_welch(data_window_channel, nfft,
+                                            noverlap, int(fs), WindowOperations.HANNING.value)
     except Exception as e:
         print(f"Error in get_psd_welch: {e}")
         return None
@@ -92,9 +89,10 @@ def main():
         # Example for CSV: assumes first column is timestamp, then EEG channels
         # Adjust based on your file format
         print(f"Loading data from: {FILE_PATH}")
-        raw_data = np.loadtxt(FILE_PATH, delimiter=',', skiprows=1) # Skip header if exists
+        raw_data = np.genfromtxt(FILE_PATH, delimiter=',', skip_header=1, usecols=range(5)) # Skip header if exists
         # Select only the EEG channels we want to use
         eeg_data = raw_data[:, EEG_CHANNEL_INDICES_IN_FILE].T # Transpose to (channels, samples)
+        eeg_data = eeg_data[1:, :]
         print(f"EEG data shape: {eeg_data.shape}")
         if eeg_data.shape[1] / SAMPLING_RATE < BASELINE_DURATION_SECONDS + ANALYSIS_WINDOW_SECONDS:
             print("Error: Data is too short for specified baseline and analysis window.")
@@ -103,8 +101,75 @@ def main():
         print(f"Error loading or processing data file: {e}")
         return
 
+    crop_time_seconds = 10  # Discard everything after this
+    crop_index = int(crop_time_seconds * SAMPLING_RATE)
+    eeg_data = eeg_data[:, :crop_index]
     total_samples = eeg_data.shape[1]
     time_vector = np.arange(total_samples) / SAMPLING_RATE
+
+    n_channels_to_plot = min(3, eeg_data.shape[0]) # Plot for the first 3 channels or fewer
+
+    fig, axs = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+    for i in range(n_channels_to_plot):
+        frequencies, power_spectral_density = welch(eeg_data[i], fs=SAMPLING_RATE, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (Before Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+    print(eeg_data[0][0:10])
+    # --- Filtering with SciPy ---
+    print("\nFiltering EEG data with SciPy...")
+    fs = SAMPLING_RATE
+    lowcut = 0.5  # Hz for high-pass
+    highcut = 35.0 # Hz for low-pass
+    filter_order = 4
+
+    eeg_data_scipy_filtered = eeg_data.copy() # Create another copy for SciPy results
+
+    print(f"Ch0 (SciPy) before any filter (first 10): {eeg_data_scipy_filtered[0, :10]}")
+
+    # Design Butterworth high-pass filter with SciPy
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    b_hp, a_hp = butter(filter_order, low, btype='highpass', analog=False)
+
+    # Design Butterworth low-pass filter with SciPy
+    high = highcut / nyq
+    b_lp, a_lp = butter(filter_order, high, btype='lowpass', analog=False)
+
+
+    for i in range(eeg_data_scipy_filtered.shape[0]):
+        print(f"  Filtering Channel {i} with SciPy...")
+        # Apply high-pass filter (zero-phase)
+        filtered_hp = filtfilt(b_hp, a_hp, eeg_data_scipy_filtered[i, :])
+        print(f"    Ch{i} (SciPy) after highpass (first 10): {filtered_hp[:10]}")
+        if np.isnan(filtered_hp).any():
+            print(f"    WARNING (SciPy): NaNs appeared in Ch{i} after highpass filter!")
+
+        # Apply low-pass filter (zero-phase) to the high-passed data
+        filtered_lp_hp = filtfilt(b_lp, a_lp, filtered_hp)
+        print(f"    Ch{i} (SciPy) after lowpass (first 10): {filtered_lp_hp[:10]}")
+        if np.isnan(filtered_lp_hp).any():
+            print(f"    WARNING (SciPy): NaNs appeared in Ch{i} after lowpass filter!")
+        
+        eeg_data_scipy_filtered[i, :] = filtered_lp_hp
+    print("SciPy filtering complete.")
+    print(f"Final SciPy filtered eeg_data[0][0:10]: {eeg_data_scipy_filtered[0, :10]}\n")
+
+    eeg_data = eeg_data_scipy_filtered
+
+    fig, axs = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+    for i in range(n_channels_to_plot):
+        frequencies, power_spectral_density = welch(eeg_data[i], fs=SAMPLING_RATE, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (After Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+
 
     # 2. Baseline Calculation Period
     baseline_samples = int(BASELINE_DURATION_SECONDS * SAMPLING_RATE)
@@ -147,9 +212,9 @@ def main():
             beta_increased = current_metrics['beta'] > baseline_metrics['beta'] * FOCUS_BETA_INCREASE_FACTOR
             alpha_decreased = current_metrics['alpha'] < baseline_metrics['alpha'] * FOCUS_ALPHA_DECREASE_FACTOR
 
-            if alpha_increased and ab_ratio_increased:
+            if alpha_increased and ab_ratio_increased and (current_metrics['beta'] < current_metrics['alpha']):
                 prediction = "Relaxed"
-            elif bt_ratio_increased and beta_increased and alpha_decreased:
+            elif bt_ratio_increased and (current_metrics['alpha'] < current_metrics['beta']):
                 prediction = "Focused"
             # Add more nuanced logic if needed based on your goals
 
@@ -182,51 +247,56 @@ def main():
         prediction_map = {"Relaxed": 2, "Focused": 1, "Neutral": 0}
         prediction_values = [prediction_map.get(p, -1) for p in predictions_text]
 
-
-        fig, axs = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
-
-        # Raw EEG (first channel for example)
-        axs[0].plot(time_vector, eeg_data[0, :])
-        axs[0].set_title(f"Raw EEG (Channel {EEG_CHANNEL_INDICES_IN_FILE[0]})")
-        axs[0].set_ylabel("Amplitude (uV)")
-        axs[0].axvspan(0, BASELINE_DURATION_SECONDS, color='gray', alpha=0.3, label='Baseline Period')
-        axs[0].legend(loc='upper right')
+        # === Main Result Plot (No EEG Here) ===
+        fig, axs = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
 
         # Band Powers
-        axs[1].plot(times, alpha_powers, label='Alpha', color='blue')
-        axs[1].plot(times, beta_powers, label='Beta', color='red')
-        axs[1].plot(times, theta_powers, label='Theta', color='green')
-        axs[1].set_title("Band Powers Over Time (Post-Baseline)")
-        axs[1].set_ylabel("Power (uV^2/Hz or arb.)")
-        axs[1].legend(loc='upper right')
-        axs[1].grid(True, linestyle=':')
+        axs[0].plot(times, alpha_powers, label='Alpha', color='blue')
+        axs[0].plot(times, beta_powers, label='Beta', color='red')
+        axs[0].plot(times, theta_powers, label='Theta', color='green')
+        axs[0].set_title("Band Powers Over Time (Post-Baseline)")
+        axs[0].set_ylabel("Power (uV²/Hz or arb.)")
+        axs[0].legend(loc='upper right')
+        axs[0].grid(True, linestyle=':')
 
         # Ratios
-        ax_ratios2 = axs[2].twinx() # Second y-axis for B/T ratio
-        axs[2].plot(times, ab_ratios, label='Alpha/Beta Ratio', color='purple')
+        ax_ratios2 = axs[1].twinx()  # Second y-axis for B/T ratio
+        axs[1].plot(times, ab_ratios, label='Alpha/Beta Ratio', color='purple')
         ax_ratios2.plot(times, bt_ratios, label='Beta/Theta Ratio', color='orange', linestyle='--')
-        axs[2].set_title("Key Ratios Over Time")
-        axs[2].set_ylabel("Alpha/Beta Ratio", color='purple')
-        ax_ratios2.set_ylabel("Beta/Theta Ratio", color='orange')
-        axs[2].tick_params(axis='y', labelcolor='purple')
+        axs[1].set_title("Key Ratios Over Time")
+        axs[1].set_ylabel("Alpha/Beta", color='purple')
+        ax_ratios2.set_ylabel("Beta/Theta", color='orange')
+        axs[1].tick_params(axis='y', labelcolor='purple')
         ax_ratios2.tick_params(axis='y', labelcolor='orange')
-        axs[2].legend(loc='upper left')
+        axs[1].legend(loc='upper left')
         ax_ratios2.legend(loc='upper right')
-        axs[2].grid(True, linestyle=':')
-
+        axs[1].grid(True, linestyle=':')
 
         # Predictions
-        axs[3].plot(times, prediction_values, drawstyle='steps-post', label='Classification', color='black', linewidth=2)
-        axs[3].set_yticks(list(prediction_map.values()))
-        axs[3].set_yticklabels(list(prediction_map.keys()))
-        axs[3].set_title("Classification Over Time")
-        axs[3].set_xlabel("Time (s)")
-        axs[3].set_ylim(min(prediction_map.values()) - 0.5, max(prediction_map.values()) + 0.5)
-        axs[3].legend(loc='upper right')
-        axs[3].grid(True, linestyle=':')
-
+        axs[2].plot(times, prediction_values, drawstyle='steps-post', label='Classification', color='black', linewidth=2)
+        axs[2].set_yticks(list(prediction_map.values()))
+        axs[2].set_yticklabels(list(prediction_map.keys()))
+        axs[2].set_title("Classification Over Time")
+        axs[2].set_xlabel("Time (s)")
+        axs[2].set_ylim(min(prediction_map.values()) - 0.5, max(prediction_map.values()) + 0.5)
+        axs[2].legend(loc='upper right')
+        axs[2].grid(True, linestyle=':')
 
         plt.tight_layout()
+        plt.pause(0.1)
+
+        # === Raw EEG Plot in a Separate Figure ===
+        fig, axs = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+        for ch_idx in range(3):
+            axs[ch_idx].plot(time_vector, eeg_data[ch_idx, :], label=f'Channel {ch_idx+1}', color='gray')
+            axs[ch_idx].set_title(f"Raw EEG Data - Channel {ch_idx+1}")
+            axs[ch_idx].set_ylabel("Amplitude (uV or arb.)")
+            axs[ch_idx].legend(loc='upper right')
+            axs[ch_idx].grid(True, linestyle=':')
+
+        axs[-1].set_xlabel("Time (s)")
+        plt.tight_layout()  
+        plt.ioff() # Turn off interactive mode
         plt.show()
 
 if __name__ == "__main__":
