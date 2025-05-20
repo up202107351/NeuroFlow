@@ -8,6 +8,7 @@ import pandas as pd # For easier data handling in plots later
 from scipy.signal import butter, filtfilt, welch
 import signal
 import os 
+import pickle
 
 try:
     from brainflow.data_filter import DataFilter, FilterTypes, DetrendOperations, WindowOperations
@@ -76,6 +77,246 @@ SAVE_PATH = "live_session_data/"
 RAW_EEG_FILENAME = ""
 METRICS_FILENAME = ""
 BASELINE_FILENAME = ""
+
+def save_session_data(full_session_eeg_data, full_session_eeg_data_raw, 
+                     full_session_timestamps_lsl, feedback_log, baseline_metrics,
+                     save_path="live_session_data/"):
+    """
+    Save the current session data to disk.
+    
+    Args:
+        full_session_eeg_data: Processed EEG data array
+        full_session_eeg_data_raw: Raw EEG data array
+        full_session_timestamps_lsl: List of timestamps
+        feedback_log: List of feedback dictionaries
+        baseline_metrics: Dictionary of baseline metrics
+        save_path: Directory to save files
+    """
+    # Create timestamp for filenames
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create directory if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
+    
+    # Save raw and processed EEG data
+    np.save(os.path.join(save_path, "eeg_data_raw.npy"), full_session_eeg_data_raw)
+    np.save(os.path.join(save_path, "eeg_data_processed.npy"), full_session_eeg_data)
+    np.save(os.path.join(save_path, "timestamps.npy"), np.array(full_session_timestamps_lsl))
+    
+    # Save baseline metrics
+    with open(os.path.join(save_path, "baseline_metrics.pkl"), 'wb') as f:
+        pickle.dump(baseline_metrics, f)
+    
+    # Save feedback log to CSV
+    if feedback_log:
+        # Flatten the metrics dictionary inside feedback_log for CSV export
+        feedback_df = pd.DataFrame([
+            {
+                'time_abs': entry['time_abs'],
+                'time_rel': entry['time_rel'],
+                'prediction': entry['prediction'],
+                'confidence': entry.get('confidence', ''),
+                'alpha': entry['metrics']['alpha'],
+                'beta': entry['metrics']['beta'],
+                'theta': entry['metrics']['theta'],
+                'ab_ratio': entry['metrics']['ab_ratio'],
+                'bt_ratio': entry['metrics']['bt_ratio']
+            } for entry in feedback_log
+        ])
+        feedback_df.to_csv(os.path.join(save_path, "feedback_log.csv"), index=False)
+
+    if full_session_eeg_data.size == 0 and not feedback_log:
+        print("No data recorded to plot.")
+        return
+    
+    print("\n--- Generating Plots ---")
+    
+    # Ensure timestamps are sensible
+    if not full_session_timestamps_lsl or len(full_session_timestamps_lsl) != full_session_eeg_data.shape[1]:
+        print("Warning: LSL timestamps inconsistent or missing. Generating approximate time axis for raw EEG.")
+        raw_time_axis = np.arange(full_session_eeg_data.shape[1]) / sampling_rate
+    else:
+        raw_time_axis = np.array(full_session_timestamps_lsl) - full_session_timestamps_lsl[0] # Relative to start
+
+    num_raw_plots = NUM_EEG_CHANNELS
+    num_metric_plots = 3 # Powers, Ratios, Predictions
+
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(12, 8), sharex=True)
+    for i in range(num_raw_plots):
+        frequencies, power_spectral_density = welch(full_session_eeg_data_raw[i], fs=256, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (Before Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+    # Adjust spacing between subplots
+    plt.tight_layout()
+
+    # Save the figure
+    plt.savefig(os.path.join(SAVE_PATH, "power_spectrum_raw.png"), dpi=300)
+
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(12, 8), sharex=True)
+    for i in range(num_raw_plots):
+        frequencies, power_spectral_density = welch(full_session_eeg_data[i], fs=256, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (After Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+
+    # Adjust spacing between subplots
+    plt.tight_layout()
+
+    # Save the figure
+    plt.savefig(os.path.join(SAVE_PATH, "power_spectrum_filtered.png"), dpi=300)
+
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(15, 3 * num_raw_plots), sharex=False)
+    current_ax = 0
+
+    # Plot Raw EEG
+    for i in range(NUM_EEG_CHANNELS):
+        ax = axs[current_ax]
+        ax.plot(raw_time_axis, full_session_eeg_data[i, :], label=f'Channel {i+1}')
+        ax.set_title(f'Raw EEG Data - Channel {i+1}')
+        ax.set_ylabel('Amplitude (uV)')
+        ax.axvspan(0, CALIBRATION_DURATION_SECONDS, color='lightgray', alpha=0.5, label='Calibration')
+        ax.grid(True, linestyle=':')
+        ax.legend(loc='upper right')
+        current_ax += 1
+
+    
+
+    # Adjust spacing between subplots
+    plt.tight_layout()
+
+    # Save the figure
+    plt.savefig(os.path.join(SAVE_PATH, "eeg.png"), dpi=300)
+
+    if current_ax > 0: axs[current_ax-1].set_xlabel('Time (s)')
+
+    fig, axs = plt.subplots(num_metric_plots, 1, figsize=(15, 3 * num_metric_plots), sharex=False)
+    current_ax = 0
+    if feedback_log:
+        metric_times = np.array([entry['time_rel'] for entry in feedback_log]) + CALIBRATION_DURATION_SECONDS # Align with raw EEG time
+        
+        # Band Powers
+        ax = axs[current_ax]
+        ax.plot(metric_times, [m['metrics']['alpha'] for m in feedback_log], label='Alpha', c='blue')
+        ax.plot(metric_times, [m['metrics']['beta'] for m in feedback_log], label='Beta', c='red')
+        ax.plot(metric_times, [m['metrics']['theta'] for m in feedback_log], label='Theta', c='green')
+        if baseline_metrics:
+            ax.axhline(baseline_metrics['alpha'],c='blue',ls='--',alpha=0.7, label='Alpha Base')
+            ax.axhline(baseline_metrics['beta'],c='red',ls='--',alpha=0.7, label='Beta Base')
+            ax.axhline(baseline_metrics['theta'],c='green',ls='--',alpha=0.7, label='Theta Base')
+        ax.set_title('Band Powers (During Feedback Phase)')
+        ax.set_ylabel('Power')
+        ax.axvspan(0, CALIBRATION_DURATION_SECONDS, color='lightgray', alpha=0.5) # Show calibration on this x-axis too
+        ax.legend(); ax.grid(True, linestyle=':')
+        current_ax+=1
+
+        # Ratios
+        ax = axs[current_ax]
+        ax_twin = ax.twinx()
+        ax.plot(metric_times, [m['metrics']['ab_ratio'] for m in feedback_log], label='A/B Ratio', c='purple')
+        if baseline_metrics: ax.axhline(baseline_metrics['ab_ratio'],c='purple',ls='--',alpha=0.7, label='A/B Base')
+        ax_twin.plot(metric_times, [m['metrics']['bt_ratio'] for m in feedback_log], label='B/T Ratio', c='orange', linestyle='--')
+        if baseline_metrics: ax_twin.axhline(baseline_metrics['bt_ratio'],c='orange',ls=':',alpha=0.7, label='B/T Base')
+        ax.set_title('Ratios (During Feedback Phase)')
+        ax.set_ylabel('A/B Ratio', color='purple'); ax.tick_params(axis='y', labelcolor='purple')
+        ax_twin.set_ylabel('B/T Ratio', color='orange'); ax_twin.tick_params(axis='y', labelcolor='orange')
+        ax.axvspan(0, CALIBRATION_DURATION_SECONDS, color='lightgray', alpha=0.5)
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax_twin.get_legend_handles_labels()
+        ax.legend(lines + lines2, labels + labels2, loc='best')
+        ax.grid(True, linestyle=':')
+        current_ax+=1
+
+        # Predictions
+        ax = axs[current_ax]
+        pred_map_final = {
+            "Neutral": 0,
+
+            "Slightly Relaxed": 1,
+            "Moderately Relaxed": 2,
+            "Strongly Relaxed": 3,
+            "Deeply Relaxed": 4, # Added from example rules
+
+            "Slightly Alert / Less Relaxed": -1,
+            "Moderately Alert / Less Relaxed": -2,
+
+            "Slightly Focused": 5,
+            "Moderately Focused": 6,
+            "Strongly Focused": 7,
+            "Highly Focused": 8, # Added from example rules
+
+            "Slightly Distracted / Less Focused": -5,
+            "Moderately Distracted / Less Focused": -6,
+
+            "Slightly Drowsy": -10,
+            "Moderately Drowsy": -11,
+            "Drowsy": -11, # Alias
+
+            "Internal Mental Activity": 9, # Could be positive or neutral depending on goal
+
+            "Unknown": -99 # For any unmapped states
+        }
+        all_predictions_in_log = sorted(list(set(entry['prediction'] for entry in feedback_log)))
+        for p_text in all_predictions_in_log:
+            if p_text not in pred_map_final:
+                print(f"Warning: Prediction '{p_text}' not found in pred_map_final. Assigning to 'Unknown'.")
+
+        pred_values = [pred_map_final.get(entry['prediction'], pred_map_final["Unknown"]) for entry in feedback_log]
+
+        ax.plot(metric_times, pred_values, drawstyle='steps-post', label='State', c='k')
+
+        # For Y-axis ticks, dynamically use only the states that actually occurred
+        # or a representative subset to keep it readable.
+        unique_pred_texts_in_log = sorted(list(set(entry['prediction'] for entry in feedback_log)))
+        used_ticks_values = sorted(list(set(pred_map_final.get(p, pred_map_final["Unknown"]) for p in unique_pred_texts_in_log)))
+
+        # Filter labels to match used_ticks_values to avoid plotting labels for unused numerical values
+        final_yticklabels = []
+        for tick_val in used_ticks_values:
+            found = False
+            for text, val in pred_map_final.items():
+                if val == tick_val and text in unique_pred_texts_in_log: # Ensure the text was actually predicted
+                    final_yticklabels.append(text)
+                    found = True
+                    break
+            if not found: # Fallback if a numeric value doesn't map back to a predicted text (shouldn't happen)
+                final_yticklabels.append(f"Val: {tick_val}")
+
+
+        if not used_ticks_values: # Handle case of no predictions logged
+            used_ticks_values = [pred_map_final["Neutral"]]
+            final_yticklabels = ["Neutral"]
+
+        ax.set_yticks(used_ticks_values)
+        ax.set_yticklabels(final_yticklabels, fontsize='small', rotation=0) # Adjust rotation if labels overlap
+        ax.set_title('Predicted State (During Feedback Phase)')
+        ax.set_ylabel('State')
+        ax.axvspan(0, CALIBRATION_DURATION_SECONDS, color='lightgray', alpha=0.5)
+        ax.legend(); ax.grid(True, linestyle=':')
+        current_ax+=1
+
+    # Align X-axis for all plots
+    max_time_overall = raw_time_axis[-1] if full_session_eeg_data.size > 0 else 0
+    if feedback_log : max_time_overall = max(max_time_overall, metric_times[-1])
+
+    for i in range(current_ax): # Iterate only up to plots actually made
+        axs[i].set_xlim(0, max_time_overall + 1)
+        if i < current_ax -1 : plt.setp(axs[i].get_xticklabels(), visible=False) # Hide x-labels for all but bottom
+
+    if current_ax > 0 : axs[current_ax-1].set_xlabel('Time (s from start of recording)')
+
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f"band_powers_{timestamp_str}.png"), dpi=300)
+    plt.show()
+    
+    print(f"\nSession data saved to: {save_path} at {datetime.now().strftime('%H:%M:%S')}")
 
 def graceful_signal_handler(sig, frame):
     global running
@@ -258,6 +499,8 @@ def feedback_loop():
     print(f"\n--- Starting Real-time Feedback (updates every {ANALYSIS_WINDOW_SECONDS:.0f}s) ---")
     session_start_time_abs = time.time() # Absolute start time of feedback phase
     total_loop_times = 0
+    last_save_time = time.time()  # Initialize last save time
+    save_interval = 120  # Save every 2 minutes (120 seconds)
 
     while running:
         loop_start_time = time.time()
@@ -400,6 +643,23 @@ def feedback_loop():
         feedback_log.append({
             "time_abs": time.time(), "time_rel": time_rel_feedback,
             "metrics": current_metrics, "prediction": state, "confidence": confidence})
+        
+        # Check if it's time to save data (every 2 minutes)
+        current_time = time.time()
+        if current_time - last_save_time >= save_interval and SAVE_DATA:
+            print("\n--- Saving session data (2-minute interval) ---")
+            try:
+                save_session_data(
+                    full_session_eeg_data, 
+                    full_session_eeg_data_raw, 
+                    full_session_timestamps_lsl,
+                    feedback_log, 
+                    baseline_metrics,
+                    SAVE_PATH
+                )
+                last_save_time = current_time
+            except Exception as e:
+                print(f"Error saving data: {e}")
         
         elapsed_in_loop = time.time() - loop_start_time
         wait_time = ANALYSIS_WINDOW_SECONDS - elapsed_in_loop
@@ -605,8 +865,23 @@ def main():
         if lsl_inlet:
             print("Closing LSL stream...")
             lsl_inlet.close_stream()
+        # Save final data
+        if SAVE_DATA:
+            print("\n--- Saving final session data ---")
+            try:
+                save_session_data(
+                    full_session_eeg_data, 
+                    full_session_eeg_data_raw, 
+                    full_session_timestamps_lsl,
+                    feedback_log, 
+                    baseline_metrics,
+                    SAVE_PATH
+                )
+            except Exception as e:
+                print(f"Error saving final data: {e}")
         print("Session ended.")
         plot_results() # Plot everything at the very end
 
 if __name__ == "__main__":
+
     main()
