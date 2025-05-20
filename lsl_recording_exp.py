@@ -5,7 +5,7 @@ import pylsl
 from datetime import datetime
 import matplotlib.pyplot as plt
 import pandas as pd # For easier data handling in plots later
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, welch
 import signal
 import os 
 
@@ -65,6 +65,7 @@ b_lp, a_lp = butter(filter_order, high, btype='lowpass', analog=False)
 baseline_metrics = None
 # For plotting at the end:
 full_session_eeg_data = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
+full_session_eeg_data_raw = np.array([]).reshape(NUM_EEG_CHANNELS, 0) # Raw EEG data
 full_session_timestamps_lsl = [] # Store LSL timestamps of first sample in each chunk
 feedback_log = [] # List of dicts: {"time_abs": wall_clock, "time_rel": rel_time, "metrics": current_metrics, "prediction": state}
 
@@ -128,8 +129,23 @@ def calculate_band_powers_for_segment(eeg_segment_all_channels):
     avg_metrics['bt_ratio'] = avg_metrics['beta'] / avg_metrics['theta'] if avg_metrics['theta'] > 1e-9 else 0
     return avg_metrics
 
+def detect_eyes_closed(metrics, baseline_alpha, baseline_ab_ratio):
+    """
+    Eyes closed typically shows:
+    1. Very strong alpha increase (often >100%)
+    2. Alpha increase without corresponding theta increase
+    3. Very sharp onset compared to gradual relaxation
+    """
+    is_likely_eyes_closed = (
+        metrics['alpha'] > baseline_alpha * 2.0 and  # Alpha doubled
+        metrics['ab_ratio'] > baseline_ab_ratio * 1.5 and  # A/B ratio increased 50%+
+        metrics['theta'] < metrics['theta'] * 1.2  # Theta didn't increase significantly
+    )
+    
+    return is_likely_eyes_closed
+
 def collect_eeg_and_process_segments(duration_seconds, is_calibration_phase=False):
-    global full_session_eeg_data, full_session_timestamps_lsl, running
+    global full_session_eeg_data, full_session_eeg_data_raw, full_session_timestamps_lsl, running
     
     collection_end_time = time.time() + duration_seconds
     collected_metrics_list = []
@@ -148,9 +164,14 @@ def collect_eeg_and_process_segments(duration_seconds, is_calibration_phase=Fals
             for i in range(NUM_EEG_CHANNELS):
                 eeg_chunk_lp[i] = filtfilt(b_lp, a_lp, eeg_chunk[i])
                 eeg_chunk_lhp[i] = filtfilt(b_hp, a_hp, eeg_chunk_lp[i])
+
+            # Correct frontal channel (if needed)
+            #eeg_chunk_lhp = correct_frontal_channel(eeg_chunk_lhp, problem_ch=2, reference_ch=1)
             
-            # Store raw data
+            # Store data
             full_session_eeg_data = np.append(full_session_eeg_data, eeg_chunk_lhp, axis=1)
+            full_session_eeg_data_raw = np.append(full_session_eeg_data, eeg_chunk, axis=1)
+
             if timestamps:
                 full_session_timestamps_lsl.extend(timestamps) # Store all LSL timestamps if needed for precise alignment
             else: # Fallback if LSL timestamps are missing from pull_chunk for some reason
@@ -200,12 +221,43 @@ def perform_calibration_phase():
         print("Calibration failed: No metrics collected. Check LSL stream.")
         return False
 
+# For channel 3 specifically:
+def correct_frontal_channel(eeg_data, problem_ch=2, reference_ch=1):
+    """Simple correction for frontal channels using symmetry"""
+    corrected_data = eeg_data.copy()
+    
+    # Get amplitude difference between channels
+    ch_diff = np.abs(eeg_data[problem_ch]) - np.abs(eeg_data[reference_ch])
+    
+    # Identify extreme differences (likely artifacts)
+    extreme_diffs = ch_diff > 100  # Threshold in μV
+    
+    # Replace extreme values with estimates based on opposite channel
+    # (preserving polarity but reducing amplitude)
+    corrected_data[problem_ch, extreme_diffs] = (
+        np.sign(eeg_data[problem_ch, extreme_diffs]) * 
+        np.abs(eeg_data[reference_ch, extreme_diffs])
+    )
+    
+    return corrected_data
+
+def reject_artifacts(eeg_data, channel_thresholds=[150, 100, 100, 150]):
+    """Flag samples with amplitudes exceeding thresholds"""
+    # Check each channel against its threshold
+    exceed_threshold = np.abs(eeg_data) > np.array(channel_thresholds).reshape(-1, 1)
+    
+    # Create a mask of "good" data points
+    good_samples = ~np.any(exceed_threshold, axis=0)
+    
+    return good_samples
+
 def feedback_loop():
     global baseline_metrics, running, feedback_log
     if not baseline_metrics: print("Cannot start feedback loop: baseline not calibrated."); return
 
     print(f"\n--- Starting Real-time Feedback (updates every {ANALYSIS_WINDOW_SECONDS:.0f}s) ---")
     session_start_time_abs = time.time() # Absolute start time of feedback phase
+    total_loop_times = 0
 
     while running:
         loop_start_time = time.time()
@@ -219,30 +271,125 @@ def feedback_loop():
             if wait_time > 0 and running: time.sleep(wait_time)
             continue # Try next analysis window
 
-        state = "Neutral"
-        # Relaxation checks
-        if current_metrics['alpha'] > baseline_metrics['alpha'] * RELAX_ALPHA_INCREASE_FACTOR and \
-           current_metrics['ab_ratio'] > baseline_metrics['ab_ratio'] * RELAX_AB_RATIO_INCREASE_FACTOR:
-            state = "Relaxed"
-        elif current_metrics['alpha'] > baseline_metrics['alpha'] * ((RELAX_ALPHA_INCREASE_FACTOR + 1.0) / 2) or \
-             current_metrics['ab_ratio'] > baseline_metrics['ab_ratio'] * ((RELAX_AB_RATIO_INCREASE_FACTOR + 1.0) / 2):
-            state = "Getting Relaxed"
-        elif current_metrics['ab_ratio'] < baseline_metrics['ab_ratio'] * LESS_RELAXED_AB_RATIO_DECREASE_FACTOR:
-            state = "Less Relaxed"
+        # --- Define Levels of Change from Baseline ---
+        # Alpha Changes
+        alpha_slight_incr = current_metrics['alpha'] > baseline_metrics['alpha'] * 1.10
+        alpha_mod_incr = current_metrics['alpha'] > baseline_metrics['alpha'] * 1.25 # Was RELAX_ALPHA_INCREASE_FACTOR
+        alpha_strong_incr = current_metrics['alpha'] > baseline_metrics['alpha'] * 1.50
 
-        # Focus checks (can potentially override relaxation if strong signals, or be combined)
-        if current_metrics['bt_ratio'] > baseline_metrics['bt_ratio'] * FOCUS_BT_RATIO_INCREASE_FACTOR and \
-           current_metrics['beta'] > baseline_metrics['beta'] * FOCUS_BETA_INCREASE_FACTOR and \
-           current_metrics['alpha'] < baseline_metrics['alpha'] * FOCUS_ALPHA_DECREASE_FACTOR:
-            state = "Focused" # Strong focus
-        elif current_metrics['bt_ratio'] > baseline_metrics['bt_ratio'] * ((FOCUS_BT_RATIO_INCREASE_FACTOR + 1.0)/2) and \
-             current_metrics['beta'] > baseline_metrics['beta'] * ((FOCUS_BETA_INCREASE_FACTOR + 1.0)/2):
-            if state == "Relaxed" or state == "Getting Relaxed": state += " & Likely Focused" # Could be calm focus
-            else: state = "Likely Focused"
-        elif current_metrics['bt_ratio'] < baseline_metrics['bt_ratio'] * LESS_FOCUSED_BT_RATIO_DECREASE_FACTOR and \
-             (state == "Neutral" or state.startswith("Less Relaxed")): # Avoid overriding strong relax state
-            state = "Less Focused"
+        alpha_slight_decr = current_metrics['alpha'] < baseline_metrics['alpha'] * 0.90
+        alpha_mod_decr = current_metrics['alpha'] < baseline_metrics['alpha'] * 0.80 # Was FOCUS_ALPHA_DECREASE_FACTOR
+        alpha_strong_decr = current_metrics['alpha'] < baseline_metrics['alpha'] * 0.65
 
+        # Beta Changes
+        beta_slight_incr = current_metrics['beta'] > baseline_metrics['beta'] * 1.10
+        beta_mod_incr = current_metrics['beta'] > baseline_metrics['beta'] * 1.20 # Was FOCUS_BETA_INCREASE_FACTOR
+        beta_strong_incr = current_metrics['beta'] > baseline_metrics['beta'] * 1.40
+
+        beta_slight_decr = current_metrics['beta'] < baseline_metrics['beta'] * 0.90
+        beta_mod_decr = current_metrics['beta'] < baseline_metrics['beta'] * 0.80
+
+        # Theta Changes
+        theta_slight_incr = current_metrics['theta'] > baseline_metrics['theta'] * 1.15
+        theta_mod_incr = current_metrics['theta'] > baseline_metrics['theta'] * 1.30
+
+        theta_slight_decr = current_metrics['theta'] < baseline_metrics['theta'] * 0.85
+        theta_mod_decr = current_metrics['theta'] < baseline_metrics['theta'] * 0.70
+
+        # Alpha/Beta Ratio Changes
+        ab_ratio_slight_incr = current_metrics['ab_ratio'] > baseline_metrics['ab_ratio'] * 1.10
+        ab_ratio_mod_incr = current_metrics['ab_ratio'] > baseline_metrics['ab_ratio'] * 1.20 # Was RELAX_AB_RATIO_INCREASE_FACTOR
+        ab_ratio_strong_incr = current_metrics['ab_ratio'] > baseline_metrics['ab_ratio'] * 1.40
+
+        ab_ratio_slight_decr = current_metrics['ab_ratio'] < baseline_metrics['ab_ratio'] * 0.90 # Was LESS_RELAXED_AB_RATIO_DECREASE_FACTOR
+        ab_ratio_mod_decr = current_metrics['ab_ratio'] < baseline_metrics['ab_ratio'] * 0.75
+
+        # Beta/Theta Ratio Changes
+        bt_ratio_slight_incr = current_metrics['bt_ratio'] > baseline_metrics['bt_ratio'] * 1.15
+        bt_ratio_mod_incr = current_metrics['bt_ratio'] > baseline_metrics['bt_ratio'] * 1.30 # Was FOCUS_BT_RATIO_INCREASE_FACTOR
+        bt_ratio_strong_incr = current_metrics['bt_ratio'] > baseline_metrics['bt_ratio'] * 1.60
+
+        bt_ratio_slight_decr = current_metrics['bt_ratio'] < baseline_metrics['bt_ratio'] * 0.85 # Was LESS_FOCUSED_BT_RATIO_DECREASE_FACTOR
+        bt_ratio_mod_decr = current_metrics['bt_ratio'] < baseline_metrics['bt_ratio'] * 0.70
+
+
+       # --- Classification Logic using the flags ---
+        state_base = "Neutral" # The core state
+        confidence = ""      # "Slightly", "Moderately", "Strongly", or ""
+
+        # **Order matters: more specific/stronger conditions first**
+
+        # **Primary Focus Indicators**
+        if beta_strong_incr and bt_ratio_strong_incr and alpha_mod_decr:
+            state_base = "Focused"
+            confidence = "Strongly"
+        elif beta_mod_incr and bt_ratio_mod_incr and (alpha_slight_decr or alpha_mod_decr):
+            state_base = "Focused"
+            confidence = "Moderately"
+        elif (beta_slight_incr and bt_ratio_slight_incr) and not alpha_mod_incr: # Alpha not also significantly up
+            state_base = "Focused" # Or "Mentally Active" if preferred
+            confidence = "Slightly"
+
+        # **Primary Relaxation Indicators** (Can override slight/moderate focus if relaxation is strong)
+        if alpha_strong_incr and ab_ratio_strong_incr:
+            state_base = "Relaxed" # Override previous if this is stronger
+            confidence = "Strongly"
+        elif alpha_mod_incr and ab_ratio_mod_incr and not beta_mod_incr:
+            # If not already strongly focused, then relaxed
+            if not (state_base == "Focused" and confidence == "Strongly"):
+                state_base = "Relaxed"
+                confidence = "Moderately"
+        elif (alpha_slight_incr and ab_ratio_slight_incr) or (alpha_mod_incr and not beta_slight_incr):
+            # If not already focused or moderately/strongly relaxed
+            if not (state_base.endswith("Focused") or (state_base == "Relaxed" and confidence in ["Moderately", "Strongly"])):
+                state_base = "Relaxed"
+                confidence = "Slightly"
+
+
+        # **Handle "Less Relaxed" / "More Alert" states**
+        # This should typically modify "Neutral" or a "Relaxed" state if a clear shift occurs
+        if state_base == "Neutral" or state_base.endswith("Relaxed"): # Only if current base is neutral or relaxed
+            if ab_ratio_mod_decr or (alpha_mod_decr and beta_slight_incr):
+                state_base = "Alert / Less Relaxed" # Merged term
+                confidence = "Moderately"
+            elif ab_ratio_slight_decr or (alpha_slight_decr and not beta_strong_incr): # Avoid if strong Beta (could be focus)
+                state_base = "Alert / Less Relaxed"
+                confidence = "Slightly"
+
+        # **Handle "Less Focused" / "Distracted" states**
+        if state_base == "Neutral" or state_base.endswith("Focused"): # Only if current base is neutral or focused
+            if bt_ratio_mod_decr or (beta_mod_decr and alpha_slight_incr):
+                state_base = "Distracted / Less Focused"
+                confidence = "Moderately"
+            elif bt_ratio_slight_decr or (beta_slight_decr and not alpha_strong_incr): # Avoid if strong alpha
+                state_base = "Distracted / Less Focused"
+                confidence = "Slightly"
+
+        # **Consider "Drowsy/Inattentive" (High Theta, Low Beta)**
+        if theta_mod_incr and beta_mod_decr and not alpha_strong_incr:
+            state_base = "Drowsy"
+            confidence = "Moderately"
+        elif theta_slight_incr and beta_slight_decr and not alpha_mod_incr:
+            state_base = "Drowsy"
+            confidence = "Slightly"
+
+        # **Refine "Internal Focus" if Beta high but Alpha also high (or not suppressed)**
+        if (state_base == "Focused" or state_base == "Mentally Active") and \
+        (alpha_slight_incr or (alpha_mod_incr and confidence != "Strongly")): # if alpha is up and focus isn't already "Strongly Focused"
+            state_base = "Internal Mental Activity" # More general term
+            # Confidence level might already be set by the focus rule
+
+        if detect_eyes_closed(current_metrics, baseline_metrics['alpha'], baseline_metrics['ab_ratio']):
+            state_base = "Eyes Closed (Alpha)"
+            confidence = "High"
+        # --- Construct final state description ---
+        if confidence and state_base != "Neutral": # Don't add confidence to "Neutral" unless you want "Slightly Neutral" etc.
+            final_state_description = f"{confidence} {state_base}"
+        else:
+            final_state_description = state_base
+
+        # This `final_state_description` is what you print and log
+        state = final_state_description # Update the 'state' variable for logging
 
         time_rel_feedback = time.time() - session_start_time_abs
         print(f"\nFeedback @ {time_rel_feedback:6.1f}s ({time.strftime('%H:%M:%S')}): {state}")
@@ -252,14 +399,16 @@ def feedback_loop():
         
         feedback_log.append({
             "time_abs": time.time(), "time_rel": time_rel_feedback,
-            "metrics": current_metrics, "prediction": state
-        })
+            "metrics": current_metrics, "prediction": state, "confidence": confidence})
         
         elapsed_in_loop = time.time() - loop_start_time
         wait_time = ANALYSIS_WINDOW_SECONDS - elapsed_in_loop
+        total_loop_times = total_loop_times + elapsed_in_loop
         if wait_time > 0 and running:
             time.sleep(wait_time)
-        if session_start_time_abs + CALIBRATION_DURATION_SECONDS + ANALYSIS_WINDOW_SECONDS > 70:
+        if CALIBRATION_DURATION_SECONDS + total_loop_times > 40:
+            print(f"  Total loops time: {total_loop_times:.2f}s")
+            total_loop_times = 0
             plot_results() # Plot every 70 seconds to avoid too many plots
             print("  Waiting for next analysis window...")
 
@@ -281,9 +430,26 @@ def plot_results():
 
     num_raw_plots = NUM_EEG_CHANNELS
     num_metric_plots = 3 # Powers, Ratios, Predictions
-    total_plots = num_raw_plots + num_metric_plots
 
-    fig, axs = plt.subplots(total_plots, 1, figsize=(15, 3 * total_plots), sharex=False)
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(12, 8), sharex=True)
+    for i in range(num_raw_plots):
+        frequencies, power_spectral_density = welch(full_session_eeg_data_raw[i], fs=256, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (Before Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(12, 8), sharex=True)
+    for i in range(num_raw_plots):
+        frequencies, power_spectral_density = welch(full_session_eeg_data[i], fs=256, nperseg=256, noverlap=128) # Adjust nperseg and noverlap as needed
+        axs[i].plot(frequencies, 10 * np.log10(power_spectral_density)) # Convert to dB for better visualization
+        axs[i].set_title(f'Power Spectrum (Welch) - Channel {i+1} (After Filtering)')
+        axs[i].set_xlabel('Frequency (Hz)')
+        axs[i].set_ylabel('Power/Frequency (dB/Hz)')
+        axs[i].grid(True)
+
+    fig, axs = plt.subplots(num_raw_plots, 1, figsize=(15, 3 * num_raw_plots), sharex=False)
     current_ax = 0
 
     # Plot Raw EEG
@@ -298,7 +464,8 @@ def plot_results():
         current_ax += 1
     if current_ax > 0: axs[current_ax-1].set_xlabel('Time (s)')
 
-
+    fig, axs = plt.subplots(num_metric_plots, 1, figsize=(15, 3 * num_metric_plots), sharex=False)
+    current_ax = 0
     if feedback_log:
         metric_times = np.array([entry['time_rel'] for entry in feedback_log]) + CALIBRATION_DURATION_SECONDS # Align with raw EEG time
         
@@ -336,13 +503,66 @@ def plot_results():
 
         # Predictions
         ax = axs[current_ax]
-        pred_map = {"Relaxed":3, "Getting Relaxed":2, "Neutral":1, "Less Relaxed":0,
-                    "Focused":-3, "Likely Focused":-2, "Less Focused":-1,
-                    "Less Relaxed / More Alert": 0.5 } # Map to numbers
-        pred_values = [pred_map.get(entry['prediction'], 0) for entry in feedback_log] # Default to neutral if unknown
-        ax.plot(metric_times, pred_values, drawstyle='steps-post', label='State', c='black')
-        ax.set_yticks(list(set(pred_map.values()))) # Use unique values from map
-        ax.set_yticklabels([k for k,v in pred_map.items() if v in set(pred_map.values())]) # Show labels
+        pred_map_final = {
+            "Neutral": 0,
+
+            "Slightly Relaxed": 1,
+            "Moderately Relaxed": 2,
+            "Strongly Relaxed": 3,
+            "Deeply Relaxed": 4, # Added from example rules
+
+            "Slightly Alert / Less Relaxed": -1,
+            "Moderately Alert / Less Relaxed": -2,
+
+            "Slightly Focused": 5,
+            "Moderately Focused": 6,
+            "Strongly Focused": 7,
+            "Highly Focused": 8, # Added from example rules
+
+            "Slightly Distracted / Less Focused": -5,
+            "Moderately Distracted / Less Focused": -6,
+
+            "Slightly Drowsy": -10,
+            "Moderately Drowsy": -11,
+            "Drowsy": -11, # Alias
+
+            "Internal Mental Activity": 9, # Could be positive or neutral depending on goal
+
+            "Unknown": -99 # For any unmapped states
+        }
+        all_predictions_in_log = sorted(list(set(entry['prediction'] for entry in feedback_log)))
+        for p_text in all_predictions_in_log:
+            if p_text not in pred_map_final:
+                print(f"Warning: Prediction '{p_text}' not found in pred_map_final. Assigning to 'Unknown'.")
+
+        pred_values = [pred_map_final.get(entry['prediction'], pred_map_final["Unknown"]) for entry in feedback_log]
+
+        ax.plot(metric_times, pred_values, drawstyle='steps-post', label='State', c='k')
+
+        # For Y-axis ticks, dynamically use only the states that actually occurred
+        # or a representative subset to keep it readable.
+        unique_pred_texts_in_log = sorted(list(set(entry['prediction'] for entry in feedback_log)))
+        used_ticks_values = sorted(list(set(pred_map_final.get(p, pred_map_final["Unknown"]) for p in unique_pred_texts_in_log)))
+
+        # Filter labels to match used_ticks_values to avoid plotting labels for unused numerical values
+        final_yticklabels = []
+        for tick_val in used_ticks_values:
+            found = False
+            for text, val in pred_map_final.items():
+                if val == tick_val and text in unique_pred_texts_in_log: # Ensure the text was actually predicted
+                    final_yticklabels.append(text)
+                    found = True
+                    break
+            if not found: # Fallback if a numeric value doesn't map back to a predicted text (shouldn't happen)
+                final_yticklabels.append(f"Val: {tick_val}")
+
+
+        if not used_ticks_values: # Handle case of no predictions logged
+            used_ticks_values = [pred_map_final["Neutral"]]
+            final_yticklabels = ["Neutral"]
+
+        ax.set_yticks(used_ticks_values)
+        ax.set_yticklabels(final_yticklabels, fontsize='small', rotation=0) # Adjust rotation if labels overlap
         ax.set_title('Predicted State (During Feedback Phase)')
         ax.set_ylabel('State')
         ax.axvspan(0, CALIBRATION_DURATION_SECONDS, color='lightgray', alpha=0.5)
