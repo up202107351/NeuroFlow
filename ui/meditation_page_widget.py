@@ -1,3 +1,4 @@
+import signal
 import sys
 import os
 import subprocess
@@ -98,6 +99,18 @@ class MeditationPageWidget(QtWidgets.QWidget):
 
         game_teaser_layout.addSpacing(10)
 
+        self.connection_status_label = QtWidgets.QLabel("Not connected to EEG")
+        self.connection_status_label.setStyleSheet("color: gray;")
+        
+        # Add it to your layout, for example:
+        # (if you have a bottom area or status area in your layout)
+        # main_layout.addWidget(self.connection_status_label)
+        
+        # If you don't want to display this label, but still need it to avoid the error,
+        # you can create it but not add it to any layout:
+        self.connection_status_label = QtWidgets.QLabel()
+        self.connection_status_label.hide()  # Hide it if you don't want to display it
+
         self.btn_start_unity_game = QtWidgets.QPushButton("Launch Unity Game")
         self.btn_start_unity_game.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
         self.btn_start_unity_game.clicked.connect(self.launch_unity_game)
@@ -116,21 +129,28 @@ class MeditationPageWidget(QtWidgets.QWidget):
             self.btn_start_unity_game.setToolTip("Muse must be connected." if not is_lsl_connected else "")
 
     def start_video_session(self):
-        if not self.main_app_window.is_lsl_connected: # Access main window's state
-             QtWidgets.QMessageBox.warning(self, "Muse Not Connected",
-                                           "Cannot start session.")
-             return
+        if not self.main_app_window.is_lsl_connected:
+            QtWidgets.QMessageBox.warning(self, "Muse Not Connected",
+                                        "Cannot start session.")
+            return
         
         print("Meditation Page: Start Video Feedback clicked.")
 
-        self.session_goal = "RELAXATION" # Set the goal for this session
-        self.is_calibrating = True # UI should show "Calibrating..."
+        self.session_goal = "RELAXATION"  # Set the goal for this session
+        self.is_calibrating = True  # UI should show "Calibrating..."
         self.is_calibrated = False
-        self.video_player_window.set_status("Calibrating EEG... Please relax.")
+        
+        if self.video_player_window:
+            self.video_player_window.set_status("Connecting to EEG...")
+            self.video_player_window.show()
+        else:
+            self.video_player_window = VideoPlayerWindow(self)
+            self.video_player_window.show()
+            self.video_player_window.set_status("Connecting to EEG...")
 
-        self.session_target_label = "Relaxed" # Example for meditation
+        self.session_target_label = "Relaxed"  # Example for meditation
         session_type_for_db = "Meditation-Video"
-        target_metric_for_db = "Relaxation" # Generic name for what's being tracked
+        target_metric_for_db = "Relaxation"  # Generic name for what's being tracked
 
         self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
             session_type_for_db, target_metric_for_db
@@ -140,12 +160,11 @@ class MeditationPageWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Session Active", "An EEG backend process is already running.")
             return
         if self.prediction_thread and self.prediction_thread.isRunning():
-             QtWidgets.QMessageBox.warning(self, "Session Active", "Prediction subscriber already running.")
-             return
-
+            QtWidgets.QMessageBox.warning(self, "Session Active", "Prediction subscriber already running.")
+            return
 
         # --- 1. Launch the backend EEG processor script ---
-        backend_script_path = "eeg_backend_processor.py" # Assuming it's in the same dir or on PATH
+        backend_script_path = "eeg_backend_processor.py"  # Assuming it's in the same dir or on PATH
         try:
             print(f"Frontend: Launching backend script: {backend_script_path}")
             # Use python -u for unbuffered output if you want to see backend prints immediately
@@ -158,141 +177,320 @@ class MeditationPageWidget(QtWidgets.QWidget):
             return
 
         # Give backend a moment to start and bind the ZMQ publisher
-        QtCore.QTimer.singleShot(1500, self._start_prediction_subscriber) # Delay subscriber start
+        QtCore.QTimer.singleShot(1500, self._start_prediction_subscriber_for_relaxation)
 
         # --- UI Updates ---
-        if not self.video_player_window:
-            self.video_player_window = VideoPlayerWindow(self)
-        self.video_player_window.show()
-        self.video_player_window.set_status("Launching EEG Backend...")
-
         self.btn_start_video_feedback.setEnabled(False)
         self.btn_stop_video_feedback.setEnabled(True)
 
-
-    def _start_prediction_subscriber(self):
-        """Starts the ZMQ subscriber thread after a short delay."""
+    def _start_prediction_subscriber_for_relaxation(self):
+        """Starts the ZMQ subscriber thread and initiates a relaxation session"""
         if self.backend_process is None or self.backend_process.poll() is not None:
             print("Frontend: Backend process not running. Cannot start subscriber.")
-            self.video_player_window.set_status("Backend failed to start.")
-            self.stop_video_session() # Clean up UI
+            if self.video_player_window:
+                self.video_player_window.set_status("Backend failed to start.")
+            self.stop_video_session()  # Clean up UI
             return
 
         print("Frontend: Starting ZMQ prediction subscriber thread.")
-        self.prediction_subscriber = EEGPredictionSubscriber() # ZMQ address is default
+        self.prediction_subscriber = EEGPredictionSubscriber()  # ZMQ address is default
         self.prediction_thread = QtCore.QThread()
         self.prediction_subscriber.moveToThread(self.prediction_thread)
 
+        # Connect signals
         self.prediction_subscriber.new_prediction_received.connect(self.on_new_eeg_prediction)
         self.prediction_subscriber.subscriber_error.connect(self.on_subscriber_error)
         self.prediction_subscriber.connection_status.connect(self.on_subscriber_connection_status)
+        self.prediction_subscriber.calibration_progress.connect(self.on_calibration_progress)
+        self.prediction_subscriber.calibration_status.connect(self.on_calibration_status)
 
+        # Thread management
         self.prediction_thread.started.connect(self.prediction_subscriber.run)
-        self.prediction_subscriber.finished.connect(self.prediction_thread.quit) # Assuming subscriber emits finished
+        self.prediction_subscriber.finished.connect(self.prediction_thread.quit)
         self.prediction_subscriber.finished.connect(self.prediction_subscriber.deleteLater)
         self.prediction_thread.finished.connect(self.prediction_thread.deleteLater)
 
+        # Start the thread
         self.prediction_thread.start()
+        
+        # Wait a moment for the thread to connect, then start relaxation session
+        QtCore.QTimer.singleShot(2000, self._start_relaxation_calibration)
+
+    def _start_relaxation_calibration(self):
+        """Start the actual relaxation session after subscriber is connected"""
+        if not self.prediction_subscriber:
+            return
+            
+        # Start the relaxation session
+        success = self.prediction_subscriber.start_relaxation_session()
+        
+        if success:
+            if self.video_player_window:
+                self.video_player_window.set_status("Calibrating EEG... Please relax.")
+            print("Frontend: Relaxation session started, calibration in progress.")
+        else:
+            if self.video_player_window:
+                self.video_player_window.set_status("Failed to start session.")
+            print("Frontend: Failed to start relaxation session.")
+            self.stop_video_session()
 
     def stop_video_session(self):
-        print("Meditation Page: Stop Video Feedback requested.")
-        if self.current_session_id is not None:
-            db_manager.end_session_and_summarize(self.current_session_id, datetime.now())
+        """Stop the current video session"""
+        print("Meditation Page: Stopping video session...")
+        
+        # Stop the subscriber thread
+        if self.prediction_subscriber:
+            try:
+                self.prediction_subscriber.stop()
+            except Exception as e:
+                print(f"Error stopping subscriber: {e}")
+        
+        # Terminate the backend process
+        if self.backend_process and self.backend_process.poll() is None:
+            try:
+                self.backend_process.terminate()
+                self.backend_process.wait(3)  # Wait up to 3 seconds for graceful termination
+                
+                # Force kill if still running
+                if self.backend_process.poll() is None:
+                    if os.name == 'nt':  # Windows
+                        os.kill(self.backend_process.pid, signal.CTRL_BREAK_EVENT)
+                    else:  # Unix/Linux
+                        os.kill(self.backend_process.pid, signal.SIGKILL)
+            except Exception as e:
+                print(f"Error terminating backend process: {e}")
+        
+        # Close the video player window
+        if self.video_player_window:
+            self.video_player_window.close()
+            self.video_player_window = None
+        
+        # Reset session state
+        self.session_goal = None
+        self.is_calibrating = False
+        self.is_calibrated = False
+        
+        # End the session in the database
+        if self.current_session_id:
+            db_manager.end_session(self.current_session_id)
             self.current_session_id = None
             self.current_session_start_time = None
-
-        self.update_button_states(self.parent().is_lsl_connected)
-        # Stop the ZMQ subscriber thread first
-        if self.prediction_subscriber:
-            self.prediction_subscriber.stop() # Signal it to stop its loop
-        if self.prediction_thread and self.prediction_thread.isRunning():
-            # Give it a moment to shut down, then force quit if necessary.
-            # Proper shutdown involves the subscriber's run loop exiting.
-            self.prediction_thread.quit()
-            if not self.prediction_thread.wait(2000): # Wait up to 2 seconds
-                 print("Frontend: Prediction thread did not quit gracefully, terminating.")
-                 self.prediction_thread.terminate()
-                 self.prediction_thread.wait()
-
-
-        # Terminate the backend process
-        if self.backend_process:
-            if self.backend_process.poll() is None: # Check if still running
-                print(f"Frontend: Terminating backend process PID: {self.backend_process.pid}")
-                self.backend_process.terminate() # Send SIGTERM
-                try:
-                    self.backend_process.wait(timeout=5) # Wait for it to terminate
-                except subprocess.TimeoutExpired:
-                    print(f"Frontend: Backend process PID: {self.backend_process.pid} did not terminate, killing.")
-                    self.backend_process.kill() # Force kill
-                print("Frontend: Backend process stopped.")
-            self.backend_process = None
-
-        if self.video_player_window:
-            self.video_player_window.set_status("Session stopped.")
-            # self.video_player_window.close()
-
+        
+        # Reset UI
         self.btn_start_video_feedback.setEnabled(True)
         self.btn_stop_video_feedback.setEnabled(False)
-        self.prediction_thread = None
-        self.prediction_subscriber = None
+        
+        print("Meditation Page: Video session stopped")
 
     @QtCore.pyqtSlot(dict) # Slot for calibration status messages
-    def on_calibration_status(self, status_data):
-        status = status_data.get("status")
-        print(f"UI: Calibration Status Update: {status}")
-        if status == "calibration_started":
-            self.is_calibrating = True
-            self.video_player_window.set_status(f"Calibrating... ({status_data.get('duration')}s remaining - estimate)")
-        elif status == "calibration_complete":
-            self.is_calibrating = False
-            self.is_calibrated = True
-            baselines = status_data.get("baselines")
-            if self.video_player_window and baselines and 'ab_ratio' in baselines:
-                self.video_player_window.set_ab_ratio_baseline(baselines['ab_ratio']) # SET BASELINE
-                self.video_player_window.set_status("Calibration Complete. Session starting.")
-            elif self.video_player_window:
-                 self.video_player_window.set_status("Calibration Complete (no A/B baseline). Session starting.")
-        elif status == "calibration_failed":
-            self.is_calibrating = False
-            self.is_calibrated = False
-            self.video_player_window.set_status(f"Calibration Failed: {status_data.get('reason', 'Unknown')}. Please try again.")
-            QtWidgets.QMessageBox.critical(self, "Calibration Failed", f"EEG baseline calibration failed. {status_data.get('reason', '')}")
-            self.stop_video_session() # Stop the attempt
+    def on_new_eeg_prediction(self, prediction_data):
+        """Handle new EEG predictions from the subscriber"""
+        # Only process PREDICTION messages
+        if prediction_data.get("message_type") != "PREDICTION":
+            return
+        
+        # Extract metrics and classification from prediction
+        classification = prediction_data.get("classification", {})
+        metrics = prediction_data.get("metrics", {})
+        
+        # Get the display state, level, and smooth value
+        state = classification.get("state", "Unknown")
+        level = classification.get("level", 0) 
+        smooth_value = classification.get("smooth_value", 0.5)
+        state_key = classification.get("state_key", "neutral")
+        
+        # Log the prediction for debugging
+        print(f"Prediction: {state} (Level: {level}, Value: {smooth_value:.2f})")
+        
+        # Store the last prediction for later queries
+        self.last_prediction = classification
+        
+        # Update the video player if it's active
+        if self.video_player_window and self.video_player_window.isVisible():
+            # Update video state based on the level and smooth value
+            self.update_video_feedback(state, level, smooth_value, state_key)
+        
+        # Log to database if session is active
+        if self.current_session_id:
+            # Save prediction to the database
+            db_manager.log_session_event(
+                self.current_session_id, 
+                "prediction", 
+                {
+                    "state": state,
+                    "level": level, 
+                    "value": smooth_value,
+                    "metrics": metrics
+                }
+            )
 
-    @QtCore.pyqtSlot(dict)
-    def on_new_eeg_prediction_received(self, prediction_dict):
-        if self.current_session_id is None:
-            return # No active session to log for
-        if self.is_calibrating or not self.is_calibrated:
-            return # Ignore predictions during calibration or if not calibrated
+    def update_video_feedback(self, state, level, smooth_value, state_key):
+        """Update the video feedback based on the mental state prediction"""
+        # Check if a session is active
+        if not self.session_goal:
+            return
+        
+        if self.is_calibrating:
+            # During calibration, just show status
+            self.video_player_window.set_status(f"Calibrating... ({state})")
+            return
+        
+        # Different logic for relaxation vs focus sessions
+        if self.session_goal == "RELAXATION":
+            # Handle relaxation feedback
+            if level <= -3:
+                # Very tense/alert
+                self.video_player_window.set_scene("very_tense")
+                self.video_player_window.set_status(f"Status: {state} (Try to relax)")
+            elif level == -2:
+                # Moderately tense/alert
+                self.video_player_window.set_scene("tense")
+                self.video_player_window.set_status(f"Status: {state} (Breathe deeply)")
+            elif level == -1:
+                # Slightly tense/less relaxed
+                self.video_player_window.set_scene("less_relaxed")
+                self.video_player_window.set_status(f"Status: {state} (Find calmness)")
+            elif level == 0:
+                # Neutral
+                self.video_player_window.set_scene("neutral")
+                self.video_player_window.set_status(f"Status: {state} (Continue relaxing)")
+            elif level == 1:
+                # Slightly relaxed
+                self.video_player_window.set_scene("slightly_relaxed")
+                self.video_player_window.set_status(f"Status: {state} (Good start)")
+            elif level == 2:
+                # Moderately relaxed
+                self.video_player_window.set_scene("moderately_relaxed")
+                self.video_player_window.set_status(f"Status: {state} (Well done)")
+            elif level == 3:
+                # Strongly relaxed
+                self.video_player_window.set_scene("strongly_relaxed")
+                self.video_player_window.set_status(f"Status: {state} (Excellent)")
+            elif level >= 4:
+                # Deeply relaxed
+                self.video_player_window.set_scene("deeply_relaxed")
+                self.video_player_window.set_status(f"Status: {state} (Perfect!)")
+            
+            # Adjust video parameters based on smooth_value (0.0 to 1.0)
+            # This allows for more fine-grained visual feedback
+            self.video_player_window.set_relaxation_level(smooth_value)
+            
+        elif self.session_goal == "FOCUS": # COPY THIS BLOCK TO THE FOCUS PAGE
+            # Handle focus feedback
+            if level <= -3:
+                # Very distracted
+                self.video_player_window.set_scene("very_distracted")
+                self.video_player_window.set_status(f"Status: {state} (Try to refocus)")
+            elif level == -2:
+                # Distracted
+                self.video_player_window.set_scene("distracted")
+                self.video_player_window.set_status(f"Status: {state} (Bring attention back)")
+            elif level == -1:
+                # Slightly distracted / less focused
+                self.video_player_window.set_scene("less_focused")
+                self.video_player_window.set_status(f"Status: {state} (Stay with it)")
+            elif level == 0:
+                # Neutral
+                self.video_player_window.set_scene("neutral")
+                self.video_player_window.set_status(f"Status: {state} (Continue focusing)")
+            elif level == 1:
+                # Slightly focused
+                self.video_player_window.set_scene("slightly_focused")
+                self.video_player_window.set_status(f"Status: {state} (Good start)")
+            elif level == 2:
+                # Moderately focused
+                self.video_player_window.set_scene("moderately_focused")
+                self.video_player_window.set_status(f"Status: {state} (Well done)")
+            elif level == 3:
+                # Strongly focused
+                self.video_player_window.set_scene("strongly_focused")
+                self.video_player_window.set_status(f"Status: {state} (Excellent)")
+            elif level >= 4:
+                # Deeply focused
+                self.video_player_window.set_scene("deeply_focused")
+                self.video_player_window.set_status(f"Status: {state} (Perfect focus!)")
+            
+            # Adjust video parameters based on smooth_value (0.0 to 1.0)
+            self.video_player_window.set_focus_level(smooth_value)
 
-        prediction_label = prediction_dict.get("prediction_label", "Unknown")        
-        ab_ratio = prediction_dict.get("current_ab_ratio") 
-
-        is_on_target = (prediction_label == self.session_target_label)
-
-        db_manager.add_session_metric(self.current_session_id, prediction_label, is_on_target, ab_ratio)
-
-        # Update video player
-        if self.video_player_window:
-            self.video_player_window.update_based_on_prediction(prediction_label)
+    @QtCore.pyqtSlot(str)
+    def on_subscriber_connection_status(self, status):
+        """Handle connection status updates from the subscriber"""
+        print(f"EEG Connection Status: {status}")
+        
+        # Update UI based on status
+        if "Connected" in status:
+            # Connected to backend
+            self.connection_status_label.setText("Connected to EEG Backend")
+            self.connection_status_label.setStyleSheet("color: green;")
+        elif "Connecting" in status:
+            # Connecting to backend
+            self.connection_status_label.setText("Connecting to EEG Backend...")
+            self.connection_status_label.setStyleSheet("color: orange;")
+        elif "Disconnected" in status or "Failed" in status or "Error" in status:
+            # Connection lost or failed
+            self.connection_status_label.setText("Disconnected from EEG Backend")
+            self.connection_status_label.setStyleSheet("color: red;")
+            
+            # If session was active, stop it
+            if self.session_goal:
+                QtWidgets.QMessageBox.warning(self, "Connection Lost",
+                    "Connection to EEG Backend lost. Session will be stopped.")
+                self.stop_video_session()
 
     @QtCore.pyqtSlot(str)
     def on_subscriber_error(self, error_message):
-        print(f"UI: Subscriber Error: {error_message}")
-        if self.video_player_window:
-            self.video_player_window.set_status(f"Comms Error: {error_message}")
-        # Optionally try to reconnect or inform user more prominently
+        """Handle error messages from the subscriber"""
+        print(f"EEG Subscriber Error: {error_message}")
+        
+        # Show error to user if serious
+        if "connection" in error_message.lower() or "timeout" in error_message.lower():
+            QtWidgets.QMessageBox.warning(self, "EEG Connection Error", error_message)
 
-    @QtCore.pyqtSlot(str)
-    def on_subscriber_connection_status(self, status_message):
-        print(f"UI: Subscriber Connection Status: {status_message}")
+    @QtCore.pyqtSlot(float)
+    def on_calibration_progress(self, progress):
+        """Handle calibration progress updates"""
+        # progress is a float from 0.0 to 1.0
         if self.video_player_window:
-             self.video_player_window.set_status(status_message)
-        if "Failed" in status_message or "Disconnected" in status_message:
-            # Consider if you want to automatically stop the session or try to reconnect
-            pass
+            percent = int(progress * 100)
+            self.video_player_window.set_status(f"Calibrating EEG: {percent}% complete")
+            
+            # Update progress bar if you have one
+            if hasattr(self.video_player_window, 'calibration_progress_bar'):
+                self.video_player_window.calibration_progress_bar.setValue(percent)
+
+    @QtCore.pyqtSlot(str, dict)
+    def on_calibration_status(self, status, baseline_data):
+        """Handle calibration status updates"""
+        print(f"Calibration Status: {status}, Baseline: {baseline_data}")
+        
+        if status == "COMPLETED":
+            # Calibration completed successfully
+            self.is_calibrating = False
+            self.is_calibrated = True
+            
+            if self.video_player_window:
+                self.video_player_window.set_status("Calibration complete. Starting session...")
+                
+                # Hide progress bar if you have one
+                if hasattr(self.video_player_window, 'calibration_progress_bar'):
+                    self.video_player_window.calibration_progress_bar.hide()
+                
+                # Start appropriate video based on session goal
+                if self.session_goal == "RELAXATION":
+                    self.video_player_window.start_relaxation_video()
+                elif self.session_goal == "FOCUS":
+                    self.video_player_window.start_focus_video()
+        
+        elif status == "FAILED":
+            # Calibration failed
+            self.is_calibrating = False
+            self.is_calibrated = False
+            
+            QtWidgets.QMessageBox.warning(self, "Calibration Failed",
+                "Failed to calibrate EEG. Please try again.")
+            
+            self.stop_video_session()
 
     # Ensure to stop the backend if the main window closes while a session is active
     def clean_up_session(self): # Call this from main window's closeEvent or page visibility change

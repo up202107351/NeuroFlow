@@ -170,6 +170,43 @@ def get_session_details(session_id):
     conn.close()
     return details
 
+def log_session_event(session_id, event_type, prediction_label=None, value=None, level=None, is_on_target=False):
+    """
+    Log various session events, including EEG predictions and user interactions.
+    
+    Args:
+        session_id: The active session ID
+        event_type: Type of event (e.g., 'PREDICTION', 'USER_FEEDBACK', 'SCENE_CHANGE')
+        prediction_label: For EEG predictions, the mental state label
+        value: Normalized value (0.0-1.0) representing state intensity
+        level: Discrete level (-3 to +4) of the mental state
+        is_on_target: Whether this state meets the session's goal
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    timestamp = datetime.now()
+    
+    if event_type == 'PREDICTION':
+        # For predictions, use the existing session_metrics table
+        add_session_metric(session_id, prediction_label, is_on_target, raw_score=value)
+        return
+        
+    # For other event types, we could add a new events table
+    # This example uses the existing session_metrics table but marks
+    # the event type in the prediction_label field
+    cursor.execute('''
+        INSERT INTO session_metrics (session_id, timestamp, prediction_label, is_on_target, raw_score)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (session_id, timestamp, f"{event_type}:{prediction_label}", is_on_target, value))
+    
+    conn.commit()
+    conn.close()
+
+def end_session(session_id):
+    """Simple wrapper to end a session without calculating summary."""
+    end_time = datetime.now()
+    return end_session_and_summarize(session_id, end_time)
+
 # Call initialize_database() once when your app starts or when this module is first imported.
 if __name__ == "__main__":
     initialize_database()

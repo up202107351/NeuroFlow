@@ -1,0 +1,375 @@
+2025-05-21 00:06:41,143 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 00:06:41,145 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 00:06:41,148 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 00:06:41,148 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 00:06:51,150 - EEG_Processor - WARNING - No subscribers connected within 10.0 seconds
+2025-05-21 00:06:51,151 - EEG_Processor - WARNING - No subscribers connected within timeout period. Continuing anyway...
+2025-05-21 08:17:30,625 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 08:17:30,626 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 08:17:30,629 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 08:17:30,629 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 08:17:30,660 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 08:17:30,660 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 08:17:32,658 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 08:17:32,658 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 08:17:32,703 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=512
+2025-05-21 08:17:32,704 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 08:17:32,806 - EEG_Processor - ERROR - Error processing command: The length of the input vector x must be greater than padlen, which is 27.
+2025-05-21 08:17:59,445 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 08:17:59,447 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 08:17:59,449 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 08:17:59,450 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 08:17:59,839 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 08:17:59,840 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 08:18:01,830 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 08:18:01,831 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 08:18:01,866 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=512
+2025-05-21 08:18:01,866 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 08:18:01,968 - EEG_Processor - ERROR - Error processing command: The length of the input vector x must be greater than padlen, which is 27.
+2025-05-21 08:34:26,166 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 08:34:26,167 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 08:34:26,170 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 08:34:26,170 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 08:34:26,550 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 08:34:26,551 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 08:34:28,532 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 08:34:28,532 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 08:34:28,565 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=512
+2025-05-21 08:34:28,565 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 08:34:28,667 - EEG_Processor - ERROR - Error processing command: The length of the input vector x must be greater than padlen, which is 27.
+2025-05-21 08:36:07,513 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 08:36:07,514 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 08:36:07,518 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 08:36:07,518 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 08:36:07,878 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 08:36:07,878 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 08:36:09,882 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 08:36:09,883 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 08:36:09,917 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=512
+2025-05-21 08:36:09,918 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 08:36:10,020 - EEG_Processor - ERROR - Error processing command: The length of the input vector x must be greater than padlen, which is 27.
+2025-05-21 08:53:18,716 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 08:53:18,717 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 08:53:18,719 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 08:53:18,720 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 08:53:19,074 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 08:53:19,074 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 08:53:21,084 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 08:53:21,084 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 08:53:21,117 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=512
+2025-05-21 08:53:21,117 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 08:53:21,219 - EEG_Processor - ERROR - Error processing command: The length of the input vector x must be greater than padlen, which is 27.
+2025-05-21 09:06:23,620 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 09:06:23,622 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 09:06:23,625 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 09:06:23,625 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 09:06:23,980 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 09:06:23,980 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 09:06:25,985 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 09:06:25,986 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 09:06:26,019 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-21 09:06:26,020 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 09:21:57,852 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 09:21:57,853 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 09:21:57,855 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 09:21:57,856 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 09:21:58,250 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 09:21:58,250 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 09:22:00,243 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 09:22:00,243 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 09:22:00,277 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-21 09:22:00,277 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 09:22:06,439 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:06,542 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:06,643 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:06,744 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:06,846 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:06,948 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,051 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,152 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,255 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,357 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,459 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,561 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,663 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,767 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,869 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:07,971 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,074 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,175 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,276 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,379 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,480 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,582 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,684 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,785 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,887 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:08,990 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,092 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,193 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,295 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,397 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,499 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,601 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,701 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,803 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:09,905 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,007 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,109 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,210 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,311 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,414 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,514 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,616 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,719 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,822 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:10,923 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,025 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,127 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,229 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,330 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,431 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,533 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,634 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,737 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,839 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:11,941 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,042 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,144 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,247 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,349 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,450 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,552 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,655 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,757 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,859 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:12,961 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,063 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,165 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,266 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,368 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,471 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,572 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,674 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,777 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,878 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:13,980 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,082 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,183 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,285 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,388 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,489 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,592 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,693 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,796 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:14,898 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,000 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,102 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,204 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,306 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,407 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,510 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,611 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,713 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,815 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:15,917 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,019 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,121 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,223 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,324 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,425 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,527 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,630 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,732 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,832 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:16,934 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,036 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,137 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,239 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,342 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,444 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,546 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,647 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,749 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,852 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:17,953 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,055 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,156 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,258 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,360 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,461 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,564 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,666 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,768 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,870 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:18,972 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,074 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,175 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,277 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,378 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,481 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,582 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,686 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,787 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,890 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:19,992 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:20,094 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:20,195 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:20,298 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:22:20,299 - EEG_Processor - ERROR - Calibration failed: No metrics collected
+2025-05-21 09:22:20,299 - EEG_Processor - INFO - Performing calibration...
+2025-05-21 09:22:20,299 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 09:28:17,642 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 09:28:17,643 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 09:28:17,646 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 09:28:17,646 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 09:28:18,041 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 09:28:18,041 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 09:28:20,022 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 09:28:20,022 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 09:28:20,058 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-21 09:28:20,059 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 09:28:20,159 - EEG_Processor - INFO - Buffer size: 27 samples, need 2048
+2025-05-21 09:28:20,260 - EEG_Processor - INFO - Buffer size: 54 samples, need 2048
+2025-05-21 09:28:20,361 - EEG_Processor - INFO - Buffer size: 90 samples, need 2048
+2025-05-21 09:28:20,463 - EEG_Processor - INFO - Buffer size: 117 samples, need 2048
+2025-05-21 09:28:20,564 - EEG_Processor - INFO - Buffer size: 144 samples, need 2048
+2025-05-21 09:28:20,666 - EEG_Processor - INFO - Buffer size: 180 samples, need 2048
+2025-05-21 09:28:20,768 - EEG_Processor - INFO - Buffer size: 207 samples, need 2048
+2025-05-21 09:28:20,869 - EEG_Processor - INFO - Buffer size: 243 samples, need 2048
+2025-05-21 09:28:20,971 - EEG_Processor - INFO - Buffer size: 270 samples, need 2048
+2025-05-21 09:28:21,072 - EEG_Processor - INFO - Buffer size: 306 samples, need 2048
+2025-05-21 09:28:21,173 - EEG_Processor - INFO - Buffer size: 333 samples, need 2048
+2025-05-21 09:28:21,274 - EEG_Processor - INFO - Buffer size: 369 samples, need 2048
+2025-05-21 09:28:21,375 - EEG_Processor - INFO - Buffer size: 396 samples, need 2048
+2025-05-21 09:28:21,477 - EEG_Processor - INFO - Buffer size: 423 samples, need 2048
+2025-05-21 09:28:21,578 - EEG_Processor - INFO - Buffer size: 459 samples, need 2048
+2025-05-21 09:28:21,680 - EEG_Processor - INFO - Buffer size: 486 samples, need 2048
+2025-05-21 09:28:21,781 - EEG_Processor - INFO - Buffer size: 522 samples, need 2048
+2025-05-21 09:28:21,883 - EEG_Processor - INFO - Buffer size: 549 samples, need 2048
+2025-05-21 09:28:21,984 - EEG_Processor - INFO - Buffer size: 585 samples, need 2048
+2025-05-21 09:28:22,086 - EEG_Processor - INFO - Buffer size: 612 samples, need 2048
+2025-05-21 09:28:22,187 - EEG_Processor - INFO - Buffer size: 648 samples, need 2048
+2025-05-21 09:28:22,289 - EEG_Processor - INFO - Buffer size: 675 samples, need 2048
+2025-05-21 09:28:22,391 - EEG_Processor - INFO - Buffer size: 702 samples, need 2048
+2025-05-21 09:28:22,492 - EEG_Processor - INFO - Buffer size: 738 samples, need 2048
+2025-05-21 09:28:22,593 - EEG_Processor - INFO - Buffer size: 765 samples, need 2048
+2025-05-21 09:28:22,694 - EEG_Processor - INFO - Buffer size: 801 samples, need 2048
+2025-05-21 09:28:22,795 - EEG_Processor - INFO - Buffer size: 828 samples, need 2048
+2025-05-21 09:28:22,897 - EEG_Processor - INFO - Buffer size: 864 samples, need 2048
+2025-05-21 09:28:22,998 - EEG_Processor - INFO - Buffer size: 891 samples, need 2048
+2025-05-21 09:28:23,101 - EEG_Processor - INFO - Buffer size: 918 samples, need 2048
+2025-05-21 09:28:23,203 - EEG_Processor - INFO - Buffer size: 954 samples, need 2048
+2025-05-21 09:28:23,304 - EEG_Processor - INFO - Buffer size: 981 samples, need 2048
+2025-05-21 09:28:23,405 - EEG_Processor - INFO - Buffer size: 1017 samples, need 2048
+2025-05-21 09:28:23,506 - EEG_Processor - INFO - Buffer size: 1044 samples, need 2048
+2025-05-21 09:28:23,607 - EEG_Processor - INFO - Buffer size: 1080 samples, need 2048
+2025-05-21 09:28:23,709 - EEG_Processor - INFO - Buffer size: 1107 samples, need 2048
+2025-05-21 09:28:23,810 - EEG_Processor - INFO - Buffer size: 1134 samples, need 2048
+2025-05-21 09:28:23,912 - EEG_Processor - INFO - Buffer size: 1170 samples, need 2048
+2025-05-21 09:28:24,013 - EEG_Processor - INFO - Buffer size: 1197 samples, need 2048
+2025-05-21 09:28:24,115 - EEG_Processor - INFO - Buffer size: 1233 samples, need 2048
+2025-05-21 09:28:24,216 - EEG_Processor - INFO - Buffer size: 1260 samples, need 2048
+2025-05-21 09:28:24,317 - EEG_Processor - INFO - Buffer size: 1296 samples, need 2048
+2025-05-21 09:28:24,418 - EEG_Processor - INFO - Buffer size: 1323 samples, need 2048
+2025-05-21 09:28:24,519 - EEG_Processor - INFO - Buffer size: 1350 samples, need 2048
+2025-05-21 09:28:24,621 - EEG_Processor - INFO - Buffer size: 1386 samples, need 2048
+2025-05-21 09:28:24,722 - EEG_Processor - INFO - Buffer size: 1413 samples, need 2048
+2025-05-21 09:28:24,824 - EEG_Processor - INFO - Buffer size: 1449 samples, need 2048
+2025-05-21 09:28:24,925 - EEG_Processor - INFO - Buffer size: 1476 samples, need 2048
+2025-05-21 09:28:25,027 - EEG_Processor - INFO - Buffer size: 1503 samples, need 2048
+2025-05-21 09:28:25,129 - EEG_Processor - INFO - Buffer size: 1539 samples, need 2048
+2025-05-21 09:28:25,230 - EEG_Processor - INFO - Buffer size: 1566 samples, need 2048
+2025-05-21 09:28:25,332 - EEG_Processor - INFO - Buffer size: 1602 samples, need 2048
+2025-05-21 09:28:25,433 - EEG_Processor - INFO - Buffer size: 1629 samples, need 2048
+2025-05-21 09:28:25,534 - EEG_Processor - INFO - Buffer size: 1665 samples, need 2048
+2025-05-21 09:28:25,635 - EEG_Processor - INFO - Buffer size: 1692 samples, need 2048
+2025-05-21 09:28:25,735 - EEG_Processor - INFO - Buffer size: 1728 samples, need 2048
+2025-05-21 09:28:25,837 - EEG_Processor - INFO - Buffer size: 1755 samples, need 2048
+2025-05-21 09:28:25,938 - EEG_Processor - INFO - Buffer size: 1782 samples, need 2048
+2025-05-21 09:28:26,039 - EEG_Processor - INFO - Buffer size: 1818 samples, need 2048
+2025-05-21 09:28:26,141 - EEG_Processor - INFO - Buffer size: 1845 samples, need 2048
+2025-05-21 09:28:26,242 - EEG_Processor - INFO - Buffer size: 1881 samples, need 2048
+2025-05-21 09:28:26,344 - EEG_Processor - INFO - Buffer size: 1908 samples, need 2048
+2025-05-21 09:28:26,446 - EEG_Processor - INFO - Buffer size: 1944 samples, need 2048
+2025-05-21 09:28:26,547 - EEG_Processor - INFO - Buffer size: 1971 samples, need 2048
+2025-05-21 09:28:26,648 - EEG_Processor - INFO - Buffer size: 1998 samples, need 2048
+2025-05-21 09:28:26,749 - EEG_Processor - INFO - Buffer size: 2034 samples, need 2048
+2025-05-21 09:28:26,849 - EEG_Processor - INFO - Buffer size: 2061 samples, need 2048
+2025-05-21 09:28:26,850 - EEG_Processor - INFO - Collected enough samples for processing: 2061
+2025-05-21 09:28:27,099 - EEG_Processor - INFO - Buffer size: 2142 samples, need 2048
+2025-05-21 09:28:27,343 - EEG_Processor - INFO - Buffer size: 2214 samples, need 2048
+2025-05-21 09:28:27,587 - EEG_Processor - INFO - Buffer size: 2286 samples, need 2048
+2025-05-21 09:28:27,832 - EEG_Processor - INFO - Buffer size: 2358 samples, need 2048
+2025-05-21 09:28:28,075 - EEG_Processor - INFO - Buffer size: 2439 samples, need 2048
+2025-05-21 09:28:28,318 - EEG_Processor - INFO - Buffer size: 2511 samples, need 2048
+2025-05-21 09:28:28,567 - EEG_Processor - INFO - Buffer size: 2583 samples, need 2048
+2025-05-21 09:28:28,812 - EEG_Processor - INFO - Buffer size: 2664 samples, need 2048
+2025-05-21 09:28:29,055 - EEG_Processor - INFO - Buffer size: 2736 samples, need 2048
+2025-05-21 09:28:29,299 - EEG_Processor - INFO - Buffer size: 2808 samples, need 2048
+2025-05-21 09:28:29,544 - EEG_Processor - INFO - Buffer size: 2880 samples, need 2048
+2025-05-21 09:28:29,786 - EEG_Processor - INFO - Buffer size: 2952 samples, need 2048
+2025-05-21 09:28:30,033 - EEG_Processor - INFO - Buffer size: 3033 samples, need 2048
+2025-05-21 09:28:30,276 - EEG_Processor - INFO - Buffer size: 3105 samples, need 2048
+2025-05-21 09:28:30,521 - EEG_Processor - INFO - Buffer size: 3177 samples, need 2048
+2025-05-21 09:28:30,766 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:31,011 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:31,253 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:31,497 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:31,742 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:31,984 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:32,229 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:32,474 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:32,722 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:32,966 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:33,208 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:33,451 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:33,697 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:33,942 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:34,183 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:34,427 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:34,673 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:34,919 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:35,166 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:35,412 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:35,654 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:35,897 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:36,140 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:36,388 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:36,632 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:36,878 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:37,121 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:37,367 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:37,611 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:37,854 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:38,098 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:38,341 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:38,585 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:38,828 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:39,070 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:39,311 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:39,557 - EEG_Processor - INFO - Buffer size: 3195 samples, need 2048
+2025-05-21 09:28:39,802 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:40,050 - EEG_Processor - INFO - Buffer size: 3186 samples, need 2048
+2025-05-21 09:28:40,192 - EEG_Processor - INFO - Calibration complete: Alpha=3.11, Beta=3.03
+2025-05-21 09:28:40,294 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:41,306 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:42,418 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:43,430 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:44,538 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:45,548 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:46,660 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:47,771 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:28:48,884 - EEG_Processor - WARNING - Segment too short for PSD: 1868 < 2048
+2025-05-21 09:32:29,960 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-21 09:32:29,961 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-21 09:32:29,964 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-21 09:32:29,964 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-21 09:32:30,344 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-21 09:32:30,344 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-21 09:32:32,337 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-21 09:32:32,337 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-21 09:32:32,372 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-21 09:32:32,372 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-21 09:32:39,139 - EEG_Processor - INFO - Collected enough samples for processing: 2061
+2025-05-21 09:32:52,452 - EEG_Processor - INFO - Calibration complete: Alpha=4.90, Beta=3.99
