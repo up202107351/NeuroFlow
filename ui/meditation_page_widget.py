@@ -10,7 +10,8 @@ matplotlib.use('Qt5Agg') # Important: Use Qt5 backend for Matplotlib
 from ui.video_player_window import VideoPlayerWindow
 from backend.eeg_prediction_subscriber import EEGPredictionSubscriber
 from backend import database_manager as db_manager
-from python_osc.udp_client import SimpleUDPClient
+import pythonosc
+from pythonosc.udp_client import SimpleUDPClient
 
 UNITY_IP = "127.0.0.1"
 UNITY_OSC_PORT = 9000
@@ -36,7 +37,7 @@ class MeditationPageWidget(QtWidgets.QWidget):
         self.session_goal = None # "RELAXATION" or "FOCUS"
         self.initUI()
 
-        self.osc_client = SimpleUDPClient(self.UNITY_IP, self.UNITY_OSC_PORT)
+        self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
         # Add a stop button to the Meditation Page UI
         self.btn_stop_video_feedback = QtWidgets.QPushButton("Stop Video Session")
         self.btn_stop_video_feedback.setStyleSheet("font-size: 11pt; padding: 8px 15px; background-color: #c0392b; color: white;")
