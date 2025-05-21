@@ -10,6 +10,11 @@ matplotlib.use('Qt5Agg') # Important: Use Qt5 backend for Matplotlib
 from ui.video_player_window import VideoPlayerWindow
 from backend.eeg_prediction_subscriber import EEGPredictionSubscriber
 from backend import database_manager as db_manager
+from python_osc.udp_client import SimpleUDPClient
+
+UNITY_IP = "127.0.0.1"
+UNITY_OSC_PORT = 9000
+UNITY_OSC_ADDRESS = "/muse/relaxation"
 
 
 class MeditationPageWidget(QtWidgets.QWidget):
@@ -30,6 +35,8 @@ class MeditationPageWidget(QtWidgets.QWidget):
         self.is_calibrated = False
         self.session_goal = None # "RELAXATION" or "FOCUS"
         self.initUI()
+
+        self.osc_client = SimpleUDPClient(self.UNITY_IP, self.UNITY_OSC_PORT)
         # Add a stop button to the Meditation Page UI
         self.btn_stop_video_feedback = QtWidgets.QPushButton("Stop Video Session")
         self.btn_stop_video_feedback.setStyleSheet("font-size: 11pt; padding: 8px 15px; background-color: #c0392b; color: white;")
@@ -302,6 +309,19 @@ class MeditationPageWidget(QtWidgets.QWidget):
         # Log the prediction for debugging
         print(f"Prediction: {state} (Level: {level}, Value: {smooth_value:.2f})")
         
+        # --- Send smooth_value to Unity via OSC ---
+        if self.osc_client:
+            # Scale smooth_value (0.0-1.0) to 0-100 for Unity slider
+            scaled_relaxation_level = smooth_value * 100.0
+            try:
+                self.osc_client.send_message(self.UNITY_OSC_ADDRESS, scaled_relaxation_level)
+                # print(f"Sent OSC: {self.UNITY_OSC_ADDRESS}, Value: {scaled_relaxation_level:.2f}") # Uncomment for debugging OSC sends
+            except Exception as e:
+                print(f"Error sending OSC message to Unity: {e}")
+        else:
+            print("OSC Client not initialized. Cannot send data to Unity.")
+        # --- End OSC Sending ---
+
         # Store the last prediction for later queries
         self.last_prediction = classification
         
@@ -501,7 +521,7 @@ class MeditationPageWidget(QtWidgets.QWidget):
     def launch_unity_game(self):
         print("Meditation Page: Launch Unity Game clicked.")
         # --- LAUNCH UNITY GAME (Copied from MeditationSelectionDialog for direct launch) ---
-        unity_game_path = r"C:/path/to/your/unity/game.exe" # <-- !!! IMPORTANT: SET THIS PATH !!!
+        unity_game_path = r"C:\Neuro\NeuroFlow.exe" # <-- !!! IMPORTANT: SET THIS PATH !!!
         # script_dir = os.path.dirname(os.path.abspath(__file__))
         # unity_game_path = os.path.join(script_dir, "YourGameFolder", "game.exe")
 
