@@ -310,18 +310,36 @@ class MeditationPageWidget(QtWidgets.QWidget):
         # Log the prediction for debugging
         print(f"Prediction: {state} (Level: {level}, Value: {smooth_value:.2f})")
         
-        # --- Send smooth_value to Unity via OSC ---
-        if self.osc_client:
-            # Scale smooth_value (0.0-1.0) to 0-100 for Unity slider
-            scaled_relaxation_level = smooth_value * 100.0
+        # --- Send smooth_value (relaxation) to Unity via OSC ---
+        if self.client:
+            scaled_relaxation_level = smooth_value * 100.0 # This is for your relaxation visualization
             try:
-                self.osc_client.send_message(self.UNITY_OSC_ADDRESS, scaled_relaxation_level)
-                # print(f"Sent OSC: {self.UNITY_OSC_ADDRESS}, Value: {scaled_relaxation_level:.2f}") # Uncomment for debugging OSC sends
+                self.client.send_message(self.UNITY_OSC_RELAXATION_ADDRESS, scaled_relaxation_level)
+                # print(f"Sent OSC: {self.UNITY_OSC_RELAXATION_ADDRESS}, Value: {scaled_relaxation_level:.2f}")
             except Exception as e:
-                print(f"Error sending OSC message to Unity: {e}")
+                print(f"Error sending relaxation OSC message to Unity: {e}")
+
+            # --- Logic to send scene change to Unity ---
+            # Define your relaxation level thresholds for scene changes
+            target_scene_index = -1 # Initialize to an invalid index
+
+            if scaled_relaxation_level >= 80: # Example: Highly relaxed
+                target_scene_index = 2 # Maps to Muse Scene 2 (e.g., build index 1+2=3)
+            elif scaled_relaxation_level >= 50: # Example: Moderately relaxed
+                target_scene_index = 1 # Maps to Muse Scene 1 (e.g., build index 1+1=2)
+            else: # Example: Low relaxation or neutral
+                target_scene_index = 0 # Maps to Muse Scene 0 (e.g., build index 1+0=1)
+
+            # Only send if the target scene index has changed
+            if target_scene_index != -1 and target_scene_index != self.last_sent_scene_index:
+                try:
+                    self.client.send_message(self.UNITY_OSC_SCENE_ADDRESS, target_scene_index)
+                    self.last_sent_scene_index = target_scene_index
+                    print(f"Sent OSC Scene Change: {self.UNITY_OSC_SCENE_ADDRESS}, Index: {target_scene_index}")
+                except Exception as e:
+                    print(f"Error sending scene OSC message to Unity: {e}")
         else:
-            print("OSC Client not initialized. Cannot send data to Unity.")
-        # --- End OSC Sending ---
+            print("OSC Client not initialized!") 
 
         # Store the last prediction for later queries
         self.last_prediction = classification
@@ -522,7 +540,7 @@ class MeditationPageWidget(QtWidgets.QWidget):
     def launch_unity_game(self):
         print("Meditation Page: Launch Unity Game clicked.")
         # --- LAUNCH UNITY GAME (Copied from MeditationSelectionDialog for direct launch) ---
-        unity_game_path = r"C:\Neuro\NeuroFlow.exe" # <-- !!! IMPORTANT: SET THIS PATH !!!
+        unity_game_path = r"C:\NeuroFlow\Neuro\NeuroFlow.exe" # <-- !!! IMPORTANT: SET THIS PATH !!!
         # script_dir = os.path.dirname(os.path.abspath(__file__))
         # unity_game_path = os.path.join(script_dir, "YourGameFolder", "game.exe")
 
