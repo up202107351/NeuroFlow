@@ -3,8 +3,11 @@ import sys
 import os
 import subprocess
 from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5.QtCore import Qt
 # import subprocess # Duplicate import
 from datetime import datetime
+import time
+import random
 import matplotlib
 matplotlib.use('Qt5Agg') # Important: Use Qt5 backend for Matplotlib
 from ui.video_player_window import VideoPlayerWindow
@@ -17,6 +20,7 @@ from backend.zmq_port_cleanup import cleanup_all_zmq_ports
 UNITY_IP = "127.0.0.1"
 UNITY_OSC_PORT = 9000
 UNITY_OSC_ADDRESS = "/muse/relaxation"
+UNITY_OSC_SCENE_ADDRESS = "/muse/scene"
 
 
 class MeditationPageWidget(QtWidgets.QWidget):
@@ -442,6 +446,10 @@ class MeditationPageWidget(QtWidgets.QWidget):
         smooth_value = classification.get("smooth_value", 0.5)
         state_key = classification.get("state_key", "neutral")
 
+        self.last_prediction = classification  # This line is crucial
+    
+        print(f"Got new prediction: state={state}, level={level}, smooth={smooth_value:.2f}")
+
         # print(f"Prediction: {state} (Level: {level}, Value: {smooth_value:.2f})")
 
         if self.client:
@@ -595,72 +603,266 @@ class MeditationPageWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "User Not Logged In", "You must be logged in to start a session.")
             return
         if self.session_goal:
-            QtWidgets.QMessageBox.warning(self, "Session Active", "A session is already running. Stop it before launching Unity.")
+            QtWidgets.QMessageBox.warning(self, "Session Active", "A session is already running.")
             return
 
         print("Meditation Page: Launch Unity Game clicked.")
+
+        self._force_cleanup_zmq_ports()
         
-        # VERY IMPORTANT: Make sure we have a valid OSC client for Unity
-        try:
-            # Recreate the OSC client to ensure it's fresh
-            self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
-            print(f"Created OSC client to Unity at {UNITY_IP}:{UNITY_OSC_PORT}")
-            
-            # Send a test message to verify connection
-            self.client.send_message("/muse/test", 1.0)
-            print("Sent test message to Unity")
-        except Exception as e:
-            print(f"Error setting up OSC client: {e}")
-            QtWidgets.QMessageBox.warning(self, "Connection Error", 
-                f"Failed to initialize OSC connection to Unity: {e}\nGame may not receive EEG data.")
-            return
+        # Show a dialog to inform user about calibration
+        QtWidgets.QMessageBox.information(self, "Calibration Required", 
+            "We'll first calibrate your EEG data before launching the game. Please relax for a moment.")
         
         # Start a session in the database
         session_type_for_db = "Meditation-Unity"
         target_metric_for_db = "Relaxation"
         
-        unity_game_path = r"C:\Users\berna\OneDrive\Documentos\GitHub\NeuroFlow\game\NeuroFlow.exe"
-        if not os.path.exists(unity_game_path):
-            msg = f"Could not find the Unity game executable at:\n{unity_game_path}"
-            print(f"Error: {msg}")
-            QtWidgets.QMessageBox.warning(self, "Error", msg)
-            return
-
+        # Launch backend and calibrate BEFORE starting Unity
+        backend_script_path = "eeg_backend_processor.py"
         try:
-            print(f"Attempting to launch: {unity_game_path}")
-            # Launch Unity game
-            subprocess.Popen([unity_game_path])
-            
-            # Start recording the session in database
-            self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
-                self.user_id, session_type_for_db, target_metric_for_db
+            print(f"Launching backend script for calibration: {backend_script_path}")
+            self.backend_process = subprocess.Popen(
+                [sys.executable, "-u", backend_script_path],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
             )
-            
-            # Mark that Unity game is active
-            self.session_goal = "UNITY_GAME"
-            self.update_button_states(self.main_app_window.is_lsl_connected)
-
-            # Inform user
-            QtWidgets.QMessageBox.information(self, "Game Launched",
-                "Unity game is launching. Make sure your Muse is connected.\n\n" +
-                "The relaxation data will be sent automatically to the game.")
-            
-            print(f"Unity game session {self.current_session_id} started for user {self.user_id}.")
-
+            print(f"Backend process started with PID: {self.backend_process.pid}")
         except Exception as e:
-            print(f"Error launching game: {e}")
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to launch the game:\n{e}")
-            self._reset_ui_and_state()
+            error_msg = f"Failed to launch backend EEG script: {e}"
+            print(f"Error: {error_msg}")
+            QtWidgets.QMessageBox.critical(self, "Backend Error", error_msg)
+            return
+        
+        # Start a calibration dialog with progress bar
+        self.calibration_dialog = QtWidgets.QProgressDialog("Calibrating EEG data...", None, 0, 100, self)
+        self.calibration_dialog.setWindowTitle("Calibrating for Unity Game")
+        self.calibration_dialog.setWindowModality(Qt.WindowModal)
+        self.calibration_dialog.setMinimumDuration(0)
+        self.calibration_dialog.setValue(0)
+        self.calibration_dialog.setAutoClose(True)
+        self.calibration_dialog.show()
+        
+        # Create and start the prediction subscriber
+        self.prediction_subscriber = EEGPredictionSubscriber()
+        self.prediction_thread = QtCore.QThread()
+        self.prediction_subscriber.moveToThread(self.prediction_thread)
+        
+        # Connect signals
+        self.prediction_subscriber.calibration_progress.connect(self.on_unity_calibration_progress)
+        self.prediction_subscriber.calibration_status.connect(self.on_unity_calibration_status)
+        self.prediction_subscriber.new_prediction_received.connect(self.on_new_eeg_prediction)
+        
+        # Start thread
+        self.prediction_thread.started.connect(self.prediction_subscriber.run)
+        self.prediction_thread.start()
+        
+        # Request calibration
+        QtCore.QTimer.singleShot(1000, lambda: self.prediction_subscriber.start_relaxation_session())
 
-    def end_unity_game_session(self):
-        if self.current_session_id and self.session_goal == "UNITY_GAME":
+    def on_unity_calibration_progress(self, progress):
+        """Update calibration dialog with progress"""
+        if hasattr(self, 'calibration_dialog'):
+            self.calibration_dialog.setValue(int(progress * 100))
+
+    def on_unity_calibration_status(self, status, baseline_data):
+        """Handle calibration completion for Unity game"""
+        if self.backend_process and self.backend_process.poll() is not None:
+            # Backend has terminated unexpectedly
+            QtWidgets.QMessageBox.critical(self, "Backend Error", 
+                "The EEG backend process has terminated unexpectedly. Please try again.")
+            self.stop_unity_session()
+            return
+        if status == "COMPLETED":
+            # Setup OSC client
+            self.is_calibrating = False
+            self.is_calibrated = True
+            try:
+                self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
+                print(f"Created OSC client to Unity at {UNITY_IP}:{UNITY_OSC_PORT}")
+                
+                # Send initial data immediately
+                self.client.send_message(UNITY_OSC_ADDRESS, 50.0)
+                self.client.send_message(UNITY_OSC_SCENE_ADDRESS, 0)
+                print("Sent initial data to Unity")
+                
+                # IMPORTANT: Wait a moment for the first few predictions to arrive
+                QtWidgets.QMessageBox.information(self, "Calibration Complete",
+                    "EEG calibration complete! The Unity game will launch in 5 seconds.\n"
+                    "This delay allows the EEG system to start generating predictions.")
+                    
+                # Use the delay to process events and gather initial predictions
+                for i in range(5):
+                    QtCore.QCoreApplication.processEvents()
+                    time.sleep(1)
+                    print(f"Waiting for predictions... ({i+1}/5)")
+                
+                # Close calibration dialog
+                if hasattr(self, 'calibration_dialog'):
+                    self.calibration_dialog.close()
+                
+                # Start database session
+                self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
+                    self.user_id, "Meditation-Unity", "Relaxation"
+                )
+                
+                # Now launch Unity game
+                unity_game_path = r"C:\Users\berna\OneDrive\Documentos\GitHub\NeuroFlow\game\NeuroFlow.exe"
+                if not os.path.exists(unity_game_path):
+                    msg = f"Could not find the Unity game executable at:\n{unity_game_path}"
+                    print(f"Error: {msg}")
+                    QtWidgets.QMessageBox.warning(self, "Error", msg)
+                    self.stop_unity_session()
+                    return
+                    
+                try:
+                    print(f"Launching Unity game: {unity_game_path}")
+                    subprocess.Popen([unity_game_path])
+                    
+                    # Set session as active
+                    self.session_goal = "UNITY_GAME"
+                    self.update_button_states(self.main_app_window.is_lsl_connected)
+                    
+                    # Start heartbeat timer
+                    self.unity_data_timer = QtCore.QTimer(self)
+                    self.unity_data_timer.timeout.connect(self.send_unity_heartbeat)
+                    self.unity_data_timer.start(2000)  # Every 2 seconds
+                    
+                    QtWidgets.QMessageBox.information(self, "Game Launched",
+                        "Unity game is launching with EEG connection ready.\nClose this message to continue.")
+                        
+                except Exception as e:
+                    print(f"Error launching game: {e}")
+                    QtWidgets.QMessageBox.critical(self, "Error", f"Failed to launch Unity game:\n{e}")
+                    self.stop_unity_session()
+            except Exception as e:
+                print(f"Error setting up OSC client: {e}")
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to setup OSC connection:\n{e}")
+                self.stop_unity_session()
+        
+        elif status == "FAILED":
+            QtWidgets.QMessageBox.critical(self, "Calibration Failed", 
+                "Failed to calibrate EEG. Please check your Muse connection and try again.")
+            self.stop_unity_session()
+
+    def send_unity_heartbeat(self):
+        """Send regular data to prevent Unity from timing out"""
+        if self.client and self.session_goal == "UNITY_GAME":
+            try:
+                # Get the most recent prediction data
+                if hasattr(self, 'last_prediction') and self.last_prediction:
+                    smooth_value = self.last_prediction.get("smooth_value", 0.5)
+                    # Log what we're actually using
+                    print(f"Using actual prediction value: {smooth_value:.2f}")
+                else:
+                    smooth_value = 0.5  # Default value
+                    print("No prediction data available, using default value: 0.5")
+                    
+                # Send the data
+                scaled_value = smooth_value * 100.0
+                self.client.send_message(UNITY_OSC_ADDRESS, scaled_value)
+                print(f"Sent to Unity: {UNITY_OSC_ADDRESS} = {scaled_value:.1f}")
+                
+                # Also send scene index occasionally
+                if random.random() < 0.2:  # ~20% chance to send scene update
+                    scene_index = 0
+                    if scaled_value >= 80:
+                        scene_index = 2
+                    elif scaled_value >= 50:
+                        scene_index = 1
+                        
+                    self.client.send_message(UNITY_OSC_SCENE_ADDRESS, scene_index)
+                    print(f"Sent scene index to Unity: {scene_index}")
+                    
+            except Exception as e:
+                print(f"Error sending Unity data: {e}")
+
+    def stop_unity_session(self):
+        """Clean up Unity game session resources"""
+        print("Stopping Unity session and cleaning up resources...")
+        
+        # Stop heartbeat timer
+        if hasattr(self, 'unity_data_timer') and self.unity_data_timer.isActive():
+            self.unity_data_timer.stop()
+        
+        # Stop prediction subscriber
+        if self.prediction_subscriber:
+            print("Stopping prediction subscriber...")
+            try:
+                self.prediction_subscriber.stop()
+                if self.prediction_thread and self.prediction_thread.isRunning():
+                    if not self.prediction_thread.wait(2000):  # Wait 2 seconds max
+                        print("Forcefully terminating prediction thread...")
+                        self.prediction_thread.terminate()
+            except Exception as e:
+                print(f"Error stopping subscriber: {e}")
+        
+        # Kill backend process - BE MORE AGGRESSIVE
+        if self.backend_process:
+            print(f"Terminating backend process PID: {self.backend_process.pid}")
+            try:
+                # First try graceful termination
+                if os.name == 'nt':  # Windows
+                    os.kill(self.backend_process.pid, signal.CTRL_BREAK_EVENT)
+                else:
+                    self.backend_process.send_signal(signal.SIGINT)
+                
+                # Wait a short time for graceful exit
+                time.sleep(1)
+                
+                # If still running, force kill
+                if self.backend_process.poll() is None:
+                    print("Force killing backend process...")
+                    if os.name == 'nt':
+                        subprocess.call(['taskkill', '/F', '/T', '/PID', str(self.backend_process.pid)])
+                    else:
+                        os.kill(self.backend_process.pid, signal.SIGKILL)
+            except Exception as e:
+                print(f"Error terminating backend: {e}")
+        
+        # Run ZMQ cleanup as safety measure
+        self._force_cleanup_zmq_ports()
+        
+        # End database session
+        if self.current_session_id:
             db_manager.end_session(self.current_session_id)
-            print(f"Unity game session {self.current_session_id} ended and recorded.")
             self.current_session_id = None
-            self.current_session_start_time = None
-            self.session_goal = None # Reset the goal
-            self.update_button_states(self.main_app_window.is_lsl_connected) # Re-enable buttons
-        elif self.session_goal == "UNITY_GAME": # Goal set but no ID - inconsistent state
-            print("Warning: end_unity_game_session called but no current_session_id. Resetting goal.")
-            self.session_goal = None
-            self.update_button_states(self.main_app_window.is_lsl_connected)
+        
+        # Reset state
+        self.session_goal = None
+        self.update_button_states(self.main_app_window.is_lsl_connected)
+        
+        print("Unity session cleanup complete")
+
+    def _force_cleanup_zmq_ports(self):
+        """Force cleanup of any processes using our ZMQ ports"""
+        print("Performing emergency ZMQ port cleanup...")
+        
+        # First try using the ZMQ cleanup utility
+        try:
+            from backend.zmq_port_cleanup import cleanup_all_zmq_ports
+            cleanup_all_zmq_ports()
+        except Exception as e:
+            print(f"ZMQ utility cleanup failed: {e}")
+        
+        # As a backup, find and kill any Python processes with eeg_backend in the name
+        try:
+            if os.name == 'nt':  # Windows
+                # Find PIDs of Python processes running our backend
+                output = subprocess.check_output('tasklist /FI "IMAGENAME eq python.exe" /FO CSV', shell=True).decode()
+                lines = output.strip().split('\n')[1:]  # Skip header
+                
+                for line in lines:
+                    if 'eeg_backend' in line.lower():
+                        try:
+                            pid = int(line.split(',')[1].strip('"'))
+                            print(f"Killing Python process with PID {pid}")
+                            os.kill(pid, signal.SIGTERM)
+                        except:
+                            pass
+            else:  # Unix-like
+                os.system("pkill -f eeg_backend_processor")
+        except:
+            pass
+        
+        # Just to be safe, give the system a moment to fully release ports
+        time.sleep(1)

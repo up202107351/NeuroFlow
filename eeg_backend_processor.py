@@ -1022,6 +1022,7 @@ class EEGProcessor:
                                 "timestamp": current_time,
                                 "session_type": self.current_session_type,
                                 "classification": classification,
+                                "smooth_value": round(classification['smooth_value'], 3),
                                 "metrics": {
                                     "alpha": round(current_metrics['alpha'], 3),
                                     "beta": round(current_metrics['beta'], 3),
