@@ -1,8 +1,9 @@
-# database_manager.py
 import sqlite3
 from datetime import datetime
 import os
 from pathlib import Path
+import hashlib
+import secrets
 
 DATABASE_DIR = Path('./app_data')
 DATABASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -17,16 +18,31 @@ def initialize_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # Users Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            last_login TIMESTAMP,
+            remember_token TEXT
+        )
+    ''')
+
     # Session Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
             session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             session_type TEXT NOT NULL,
             start_time TIMESTAMP NOT NULL,
             end_time TIMESTAMP,
             duration_seconds INTEGER,
             target_metric_name TEXT, -- e.g., 'Relaxation', 'Focus'
-            notes TEXT -- Optional user notes
+            notes TEXT, -- Optional user notes
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
 
@@ -58,20 +74,169 @@ def initialize_database():
     conn.close()
     print(f"Database initialized/checked at {DATABASE_NAME}")
 
-# --- Functions to interact with the database ---
+# --- User authentication functions ---
 
-def start_new_session(session_type, target_metric_name=""):
+def hash_password(password, salt=None):
+    """Hash password with salt using SHA-256"""
+    if salt is None:
+        # Generate a new random salt
+        salt = secrets.token_hex(16)
+    
+    # Create the hash
+    pw_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    return pw_hash, salt
+
+def register_user(username, password):
+    """Register a new user with hashed password"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if username already exists
+    cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+    if cursor.fetchone():
+        conn.close()
+        return False, "Username already exists"
+    
+    # Hash the password
+    password_hash, salt = hash_password(password)
+    created_at = datetime.now()
+    
+    # Insert new user
+    try:
+        cursor.execute('''
+            INSERT INTO users (username, password_hash, salt, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (username, password_hash, salt, created_at))
+        conn.commit()
+        user_id = cursor.lastrowid
+        conn.close()
+        return True, user_id
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+def authenticate_user(username, password):
+    """Authenticate user by checking hashed password"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get user data
+    cursor.execute('''
+        SELECT user_id, password_hash, salt
+        FROM users 
+        WHERE username = ?
+    ''', (username,))
+    user_data = cursor.fetchone()
+    
+    if not user_data:
+        conn.close()
+        return False, "User not found"
+    
+    # Verify password
+    stored_hash = user_data['password_hash']
+    salt = user_data['salt']
+    
+    # Hash the provided password with the stored salt
+    input_hash, _ = hash_password(password, salt)
+    
+    if input_hash == stored_hash:
+        # Update last login time
+        user_id = user_data['user_id']
+        cursor.execute('''
+            UPDATE users 
+            SET last_login = ?
+            WHERE user_id = ?
+        ''', (datetime.now(), user_id))
+        conn.commit()
+        conn.close()
+        return True, user_id
+    else:
+        conn.close()
+        return False, "Incorrect password"
+
+def set_remember_token(user_id, remember=True):
+    """Set or clear the remember token for a user"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if remember:
+        # Generate a unique token
+        token = secrets.token_hex(32)
+        cursor.execute('''
+            UPDATE users 
+            SET remember_token = ?
+            WHERE user_id = ?
+        ''', (token, user_id))
+    else:
+        # Clear the token
+        cursor.execute('''
+            UPDATE users 
+            SET remember_token = NULL
+            WHERE user_id = ?
+        ''', (user_id,))
+    
+    conn.commit()
+    conn.close()
+    return token if remember else None
+
+def get_user_by_token(token):
+    """Retrieve user by remember token"""
+    if not token:
+        print("No token provided to get_user_by_token()")
+        return None
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    print(f"Looking up user with token: {token[:10]}...")
+    
+    try:
+        cursor.execute('''
+            SELECT user_id, username, remember_token
+            FROM users 
+            WHERE remember_token = ?
+        ''', (token,))
+        
+        user = cursor.fetchone()
+        
+        if user:
+            print(f"Found user: {user['username']} with matching token")
+            user_dict = dict(user)
+            conn.close()
+            return user_dict
+        else:
+            # If no user found, let's check what tokens actually exist in the database
+            cursor.execute('SELECT username, remember_token FROM users WHERE remember_token IS NOT NULL')
+            existing_tokens = cursor.fetchall()
+            if existing_tokens:
+                print(f"Found {len(existing_tokens)} users with tokens in database:")
+                for u in existing_tokens:
+                    # Show truncated tokens for comparison
+                    print(f" - {u['username']}: {u['remember_token'][:10]}...")
+            else:
+                print("No users with tokens found in database")
+            
+            conn.close()
+            return None
+    except Exception as e:
+        print(f"Database error in get_user_by_token(): {e}")
+        conn.close()
+        return None
+
+# --- Functions to interact with the database (updated with user_id) ---
+
+def start_new_session(user_id, session_type, target_metric_name=""):
     conn = get_db_connection()
     cursor = conn.cursor()
     start_time = datetime.now()
     cursor.execute('''
-        INSERT INTO sessions (session_type, start_time, target_metric_name)
-        VALUES (?, ?, ?)
-    ''', (session_type, start_time, target_metric_name))
+        INSERT INTO sessions (user_id, session_type, start_time, target_metric_name)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, session_type, start_time, target_metric_name))
     session_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    print(f"Started new session ID: {session_id} of type {session_type}")
+    print(f"Started new session ID: {session_id} of type {session_type} for user {user_id}")
     return session_id, start_time
 
 def add_session_metric(session_id, prediction_label, is_on_target, raw_score=None):
@@ -142,7 +307,7 @@ def end_session_and_summarize(session_id, end_time):
     print(f"Ended and summarized session ID: {session_id}")
 
 
-def get_all_sessions_summary():
+def get_all_sessions_summary(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -150,8 +315,9 @@ def get_all_sessions_summary():
                ss.percent_on_target, ss.time_on_target_seconds
         FROM sessions s
         JOIN session_summary ss ON s.session_id = ss.session_id
+        WHERE s.user_id = ?
         ORDER BY s.start_time DESC
-    ''')
+    ''', (user_id,))
     sessions = cursor.fetchall() # Returns a list of sqlite3.Row objects
     conn.close()
     return sessions
@@ -202,10 +368,45 @@ def log_session_event(session_id, event_type, prediction_label=None, value=None,
     conn.commit()
     conn.close()
 
+def get_all_sessions_summary_legacy():
+    """Legacy function for old DB schema without user_id"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT s.session_id, s.session_type, s.start_time, s.duration_seconds,
+               ss.percent_on_target, ss.time_on_target_seconds
+        FROM sessions s
+        JOIN session_summary ss ON s.session_id = ss.session_id
+        ORDER BY s.start_time DESC
+    ''')
+    sessions = cursor.fetchall() # Returns a list of sqlite3.Row objects
+    conn.close()
+    return sessions
+
 def end_session(session_id):
     """Simple wrapper to end a session without calculating summary."""
     end_time = datetime.now()
     return end_session_and_summarize(session_id, end_time)
+
+def ensure_remember_token_column_exists():
+    """Make sure the remember_token column exists in the users table"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if the column exists
+    cursor.execute("PRAGMA table_info(users)")
+    columns = cursor.fetchall()
+    column_names = [col['name'] for col in columns]
+    
+    if 'remember_token' not in column_names:
+        print("Adding remember_token column to users table...")
+        cursor.execute("ALTER TABLE users ADD COLUMN remember_token TEXT")
+        conn.commit()
+        print("Column added successfully")
+    else:
+        print("remember_token column already exists")
+        
+    conn.close()
 
 # Call initialize_database() once when your app starts or when this module is first imported.
 if __name__ == "__main__":

@@ -9,58 +9,13 @@ from ui.home_page_widget import HomePageWidget
 from ui.meditation_page_widget import MeditationPageWidget
 from ui.focus_page_widget import FocusPageWidget
 from ui.history_page_widget import HistoryPageWidget
+from ui.login_widget import LoginWidget
 from backend.lsl_status_checker import LSLStatusChecker
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# --- Placeholder Dialogs (Keep these from previous code) ---
-# --- MeditationSelectionDialog (Modified) ---
-class MeditationSelectionDialog(QtWidgets.QDialog):
-    VIDEO_FEEDBACK = 1
-    UNITY_GAME = 2
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Select Meditation Type")
-        self.setModal(True)
-        self.selection = None # To store what the user selected
-        self.initUI()
-
-    def initUI(self):
-        layout = QtWidgets.QVBoxLayout(self)
-        label = QtWidgets.QLabel("Choose your meditation feedback method:")
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setFont(QtGui.QFont("Arial", 12))
-        layout.addWidget(label)
-
-        self.btn_video = QtWidgets.QPushButton("Video Feedback (EEG Based)")
-        self.btn_game = QtWidgets.QPushButton("Start Unity Game")
-        button_style = "QPushButton { font-size: 11pt; padding: 8px; }"
-        self.btn_video.setStyleSheet(button_style)
-        self.btn_game.setStyleSheet(button_style)
-
-        layout.addSpacing(15)
-        layout.addWidget(self.btn_video)
-        layout.addWidget(self.btn_game)
-        layout.addSpacing(10)
-
-        self.btn_video.clicked.connect(self.select_video)
-        self.btn_game.clicked.connect(self.select_game)
-
-    def select_video(self):
-        print("Dialog: Video Feedback selected!")
-        self.selection = MeditationSelectionDialog.VIDEO_FEEDBACK
-        self.accept() # Closes dialog, signals success
-
-    def select_game(self):
-        print("Dialog: Unity Game selected!")
-        self.selection = MeditationSelectionDialog.UNITY_GAME
-        self.accept() # Closes dialog, signals success
-
-    def get_selection(self):
-        return self.selection
        
 # --- Main Application Window ---
 class NeuroAppMainWindow(QtWidgets.QMainWindow):
@@ -72,6 +27,9 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         self.setGeometry(50, 50, 900, 600)
         self.sidebar_buttons = {}
         self.is_lsl_connected = False # Track LSL connection state
+        self.current_user_id = None
+        self.current_username = None
+        
         self.initUI()
         self.update_active_button(self.sidebar_buttons["Home"])
 
@@ -82,7 +40,6 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
 
         # Connect the signal for updating UI
         self.lsl_status_changed_signal.connect(self.update_lsl_status_ui)
-
 
     def initUI(self):
         # --- Main Widget and Layout ---
@@ -117,6 +74,40 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
             self.sidebar_buttons[item_text] = button
 
         sidebar_layout.addStretch(1) # Push nav items up
+
+        # --- User info display ---
+        self.user_info_label = QtWidgets.QLabel("")
+        self.user_info_label.setObjectName("userInfoLabel")
+        self.user_info_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.user_info_label.setStyleSheet("""
+            QLabel#userInfoLabel {
+                font-size: 9pt;
+                color: #ccc;
+                padding: 5px;
+                border-top: 1px solid #444;
+                font-weight: bold;
+            }
+        """)
+        sidebar_layout.addWidget(self.user_info_label)
+        
+        # --- Logout button ---
+        self.logout_button = QtWidgets.QPushButton("Logout")
+        self.logout_button.setObjectName("logoutButton")
+        self.logout_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.logout_button.setStyleSheet("""
+            QPushButton#logoutButton {
+                font-size: 9pt;
+                color: #e74c3c;
+                background-color: transparent;
+                border: none;
+                padding: 5px;
+            }
+            QPushButton#logoutButton:hover {
+                text-decoration: underline;
+            }
+        """)
+        self.logout_button.clicked.connect(self.logout)
+        sidebar_layout.addWidget(self.logout_button)
 
         # --- LSL Status Label in Sidebar ---
         self.lsl_status_label = QtWidgets.QLabel("Muse: Checking...")
@@ -161,7 +152,59 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         # Remove the main window status bar as it's no longer used for LSL status
         # self.statusBar().showMessage("Ready") # Remove or repurpose
         self.setStatusBar(None) # Completely remove status bar
-
+        
+    def set_user(self, user_id, username):
+        """Set the current user after login"""
+        self.current_user_id = user_id
+        self.current_username = username
+        self.user_info_label.setText(f"User: {username}")
+        
+        # Update any components that need user info
+        if hasattr(self, 'history_page') and self.history_page:
+            self.history_page.load_user_data(user_id)
+        
+        # Also pass user_id to meditation and focus pages if they need it
+        if hasattr(self, 'meditation_page') and self.meditation_page:
+            self.meditation_page.user_id = user_id
+        
+        if hasattr(self, 'focus_page') and self.focus_page:
+            self.focus_page.user_id = user_id
+        
+    def logout(self):
+        """Handle user logout"""
+        from backend.database_manager import set_remember_token
+        
+        # Clear remember token
+        if self.current_user_id:
+            set_remember_token(self.current_user_id, False)
+            
+        # Clear token file
+        token_file = os.path.join('app_data', 'auth_token.json')
+        if os.path.exists(token_file):
+            try:
+                os.remove(token_file)
+            except Exception as e:
+                print(f"Error removing token file: {e}")
+                
+        # Use the stored reference to the ModernWindow wrapper
+        if hasattr(self, 'modern_window') and self.modern_window:
+            print("Hiding modern window wrapper")
+            self.modern_window.hide()
+        else:
+            print("No modern_window reference, trying parent()")
+            parent_window = self.parent()
+            if parent_window:
+                parent_window.hide()
+            else:
+                self.hide()
+        
+        # Show login window
+        self.login_window.show()
+        
+        # Reset user data
+        self.current_user_id = None
+        self.current_username = None
+        self.user_info_label.setText("")
 
     def update_lsl_status_ui(self, connected, message):
         """Updates the LSL status label in the sidebar and internal state."""
@@ -238,7 +281,7 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
                 target_widget = self.page_map[page_name]
                 self.stacked_widget.setCurrentWidget(target_widget)
                 self.update_active_button(sender_button)
-                self.statusBar().showMessage(f"{page_name} page loaded")
+                # self.statusBar().showMessage(f"{page_name} page loaded")
             else:
                 print(f"Warning: No page mapped for button '{page_name}'")
 
@@ -249,47 +292,70 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         active_button.setChecked(True) # Ensure it's checked programmatically too
 
 
-    # --- Action Methods ---
-    # These methods are now triggered by signals from the HomePageWidget or potentially
-    # directly if we add corresponding buttons to the Meditation/Focus pages later.
-
-    def start_meditation_dialog(self):
-        """Shows the dialog to choose meditation type."""
-        print("Meditation requested from Home Page")
-        self.statusBar().showMessage("Opening Meditation setup...")
-        dialog = MeditationSelectionDialog(self)
-        result = dialog.exec_()
-        if result == QtWidgets.QDialog.Accepted:
-            print("Meditation selection dialog closed successfully.")
-            self.statusBar().showMessage("Meditation setup completed or initiated.")
-        else:
-            print("Meditation selection dialog cancelled.")
-            self.statusBar().showMessage("Meditation setup cancelled.")
-
-    def start_focus_dialog(self):
-        """Placeholder for focus setup."""
-        print("Focus requested from Home Page")
-        self.statusBar().showMessage("Starting Focus setup...")
-        # TODO: Implement focus selection dialog (Work monitoring vs Session)
-        QtWidgets.QMessageBox.information(self, "Focus", "Focus Session setup not yet implemented.")
-
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-
+    
+    # Apply qtmodern style
+    qtmodern.styles.dark(app)  # Explicitly set dark theme
+    
+    # Create login window first
+    login_widget = LoginWidget()
+    login_window = qtmodern.windows.ModernWindow(login_widget)
+    
+    # Create main app window but don't show it yet
     main_window = NeuroAppMainWindow()
+    modern_window = qtmodern.windows.ModernWindow(main_window)
+    
+    # Store references to both windows
+    main_window.login_window = login_window
+    main_window.login_widget = login_widget
+    main_window.modern_window = modern_window  # Store reference to its own wrapper
+    
+    # Connect login signal to show main window
+    def on_login_successful(user_id, username):
+        login_window.hide()
+        main_window.set_user(user_id, username)
+        modern_window.show()
+    
+    login_widget.login_successful.connect(on_login_successful)
+    
+    # Create a flag to track whether we've shown any windows
+    window_shown = False
+    
+    # First check for auto-login
+    if login_widget.check_remembered_login():
+        try:
+            # Read token from file
+            import json
+            from pathlib import Path
+            token_file = Path('./app_data/auth_token.json')
 
-    # Apply qtmodern style (ensure qtmodern is installed: pip install qtmodern)
-    mw = qtmodern.windows.ModernWindow(main_window)
-    qtmodern.styles.dark(app) # Explicitly set dark theme
-
-    # Add specific styling for the sidebar (optional, qtmodern does a lot)
-    # You can load from a .qss file or define here
-    # Using objectName allows specific targeting
+            from backend.database_manager import get_user_by_token
+            
+            with open(token_file, 'r') as f:
+                data = json.load(f)
+                token = data.get('token')
+                
+                if token:
+                    user = get_user_by_token(token)
+                    if user:
+                        print(f"Auto-login succeeded, directly calling handler")
+                        # Directly call the handler to show main window
+                        on_login_successful(user['user_id'], user['username'])
+                        window_shown = True
+        except Exception as e:
+            print(f"Error during auto-login: {e}")
+    
+    # Only show login window if no window has been shown yet
+    if not window_shown:
+        print("Manual login required, showing login window")
+        login_window.show()
+    
+    # Add specific styling
     app.setStyleSheet("""
         #main_widget {
-            background-color: #17121C;ZXCZXC
+            background-color: #17121C;
         }
         #sidebar {
             background-color: #2a2a2a; /* Slightly different background for sidebar */
@@ -297,5 +363,4 @@ if __name__ == "__main__":
         /* Add other global styles if needed */
     """)
 
-    mw.show()
     sys.exit(app.exec_())

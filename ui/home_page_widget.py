@@ -17,7 +17,7 @@ class HomePageWidget(QtWidgets.QWidget):
         # --- Logo ---
         logo_label = QtWidgets.QLabel()
         # IMPORTANT: Replace with the actual path to your logo image
-        logo_path = "logo.png" 
+        logo_path = "./assets/logo.png" 
         if os.path.exists(logo_path):
              pixmap = QtGui.QPixmap(logo_path)
              # Scale pixmap smoothly while keeping aspect ratio

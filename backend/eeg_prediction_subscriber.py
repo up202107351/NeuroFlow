@@ -11,6 +11,7 @@ import zmq
 import logging
 import numpy as np
 from PyQt5 import QtCore
+import queue
 
 # Set up logging
 logging.basicConfig(
@@ -46,6 +47,8 @@ class EEGPredictionSubscriber(QtCore.QObject):
         self.max_history_size = 10
         self.session_active = False
         self.current_session_type = None
+        self.command_queue = queue.Queue()  # Queue for non-blocking commands
+        self.command_timer = None  # Timer for processing commands
         
     def send_command(self, command_dict):
         """Send a command to the EEG backend processor"""
@@ -117,47 +120,168 @@ class EEGPredictionSubscriber(QtCore.QObject):
                 self.sync_socket = None
             return False
             
+    # UPDATED: Make this non-blocking by using the command queue
     def start_relaxation_session(self):
-        """Start a relaxation session"""
+        """Start a relaxation session - non-blocking version"""
         if self.session_active:
+            print("Session already active, not starting new one")
             logger.warning("Session already active")
             return False
-            
-        response = self.send_command({"command": "START_SESSION", "session_type": "RELAXATION"})
-        if response.get("status") == "SUCCESS":
-            self.session_active = True
-            self.current_session_type = "RELAXATION"
+                
+        try:
+            # Queue the command instead of sending directly
+            cmd = {
+                "command_type": "START_SESSION",
+                "params": {"command": "START_SESSION", "session_type": "RELAXATION"}
+            }
+            print(f"Queuing command: {cmd}")
+            self.command_queue.put(cmd)
+            print(f"Command queue size now: {self.command_queue.qsize()}")
+            logger.info("Relaxation session command queued")
             return True
-        else:
+        except Exception as e:
+            print(f"Error queuing relaxation session command: {e}")
+            logger.error(f"Error queuing relaxation session command: {e}")
             return False
             
+    # UPDATED: Make this non-blocking by using the command queue  
     def start_focus_session(self):
-        """Start a focus session"""
+        """Start a focus session - non-blocking version"""
         if self.session_active:
             logger.warning("Session already active")
             return False
             
-        response = self.send_command({"command": "START_SESSION", "session_type": "FOCUS"})
-        if response.get("status") == "SUCCESS":
-            self.session_active = True
-            self.current_session_type = "FOCUS"
+        try:
+            # Queue the command instead of sending directly
+            self.command_queue.put({
+                "command_type": "START_SESSION",
+                "params": {"command": "START_SESSION", "session_type": "FOCUS"}
+            })
+            logger.info("Focus session command queued")
             return True
-        else:
+        except Exception as e:
+            logger.error(f"Error queuing focus session command: {e}")
             return False
             
+    # UPDATED: Make this non-blocking by using the command queue
     def stop_session(self):
-        """Stop the current session"""
+        """Stop the current session - non-blocking version"""
         if not self.session_active:
             logger.warning("No active session to stop")
             return True
             
-        response = self.send_command({"command": "STOP_SESSION"})
-        if response.get("status") == "SUCCESS":
-            self.session_active = False
-            self.current_session_type = None
+        try:
+            # Queue the command instead of sending directly
+            self.command_queue.put({
+                "command_type": "STOP_SESSION",
+                "params": {"command": "STOP_SESSION"}
+            })
+            logger.info("Stop session command queued")
             return True
-        else:
+        except Exception as e:
+            logger.error(f"Error queuing stop session command: {e}")
             return False
+    
+    # NEW: Add a method to process the command queue
+    def process_command_queue(self):
+        """Process pending commands from the queue in a non-blocking way"""
+        try:
+            if not self.command_queue.empty():
+                print(f"Command queue has {self.command_queue.qsize()} commands to process")
+                
+            while not self.command_queue.empty():
+                cmd_data = self.command_queue.get_nowait()
+                cmd_type = cmd_data.get("command_type")
+                params = cmd_data.get("params", {})
+                
+                print(f"Processing queued command: {cmd_type} with params {params}")
+                logger.info(f"Processing queued command: {cmd_type}")
+                
+                # Handle different types of commands
+                if cmd_type == "START_SESSION":
+                    # Make sure command socket is connected 
+                    if not self.command_socket:
+                        print("Command socket not connected, reconnecting...")
+                        self.connect_command_socket()
+                    
+                    if not self.command_socket:
+                        print("Failed to connect command socket!")
+                        logger.error("Cannot send command: Command socket not connected")
+                        continue
+                    
+                    # Send command with timeout
+                    try:
+                        print(f"Sending command to backend: {params}")
+                        self.command_socket.send_json(params)
+                        
+                        # Wait for response with timeout
+                        poller = zmq.Poller()
+                        poller.register(self.command_socket, zmq.POLLIN)
+                        
+                        if poller.poll(2000):  # 2 second timeout
+                            response = self.command_socket.recv_json()
+                            print(f"Received command response: {response}")
+                            logger.info(f"Command response: {response}")
+                            
+                            if response.get("status") == "SUCCESS":
+                                self.session_active = True
+                                self.current_session_type = params.get("session_type")
+                                print(f"Session {self.current_session_type} activated successfully")
+                        else:
+                            print("Command response timeout!")
+                            logger.warning("Command response timeout")
+                            # Don't mark as session_active yet
+                            
+                    except Exception as e:
+                        print(f"Error sending command: {e}")
+                        logger.error(f"Error sending command: {e}")
+                        
+                elif cmd_type == "STOP_SESSION":
+                    # Make sure command socket is connected 
+                    if not self.command_socket:
+                        print("Command socket not connected, reconnecting...")
+                        self.connect_command_socket()
+                    
+                    if not self.command_socket:
+                        print("Failed to connect command socket!")
+                        logger.error("Cannot send command: Command socket not connected")
+                        continue
+                    
+                    # Send command with timeout
+                    try:
+                        print(f"Sending command to backend: {params}")
+                        self.command_socket.send_json(params)
+                        
+                        # Wait for response with timeout
+                        poller = zmq.Poller()
+                        poller.register(self.command_socket, zmq.POLLIN)
+                        
+                        if poller.poll(2000):  # 2 second timeout
+                            response = self.command_socket.recv_json()
+                            print(f"Received command response: {response}")
+                            logger.info(f"Command response: {response}")
+                            
+                            if response.get("status") == "SUCCESS":
+                                print(f"Session {self.current_session_type} deactivated successfully")
+                                self.session_active = False
+                                self.current_session_type = None
+                        else:
+                            print("Command response timeout!")
+                            logger.warning("Command response timeout")
+                            # Don't mark as session_active yet
+                            
+                    except Exception as e:
+                        print(f"Error sending command: {e}")
+                        logger.error(f"Error sending command: {e}")
+                
+                # Mark command as done
+                self.command_queue.task_done()
+                
+        except queue.Empty:
+            pass  # Queue is empty, nothing to do
+        except Exception as e:
+            logger.error(f"Error processing command queue: {e}")
+            self.subscriber_error.emit(f"Command processing error: {e}")
     
     @QtCore.pyqtSlot()
     def run(self):
@@ -185,15 +309,22 @@ class EEGPredictionSubscriber(QtCore.QObject):
             
             self.connection_status.emit(f"Connected to EEG Backend.")
             print(f"Connected to ZMQ Publisher.")
-            self.last_heartbeat_time = time.time()  # Initialize heartbeat timer
+            self.last_heartbeat_time = time.time()
+            
+            # VERY IMPORTANT - Create command processing timer in the thread
+            print("Setting up command processing timer...")
+            self.command_timer = QtCore.QTimer()
+            self.command_timer.timeout.connect(self.process_command_queue)
+            self.command_timer.start(100)  # Process commands every 100ms
+            print("Command timer started!")
             
         except zmq.error.ZMQError as e:
             err_msg = f"ZMQ connection error: {e}"
             print(err_msg)
             self.subscriber_error.emit(err_msg)
             self.connection_status.emit(f"Connection Failed: {e}")
-            self._running = False  # Stop if connection fails initially
-            
+            self._running = False
+                
         # Set up poller for subscriber socket
         poller = zmq.Poller()
         poller.register(self.subscriber, zmq.POLLIN)
@@ -203,6 +334,10 @@ class EEGPredictionSubscriber(QtCore.QObject):
             try:
                 # Poll with a timeout to allow checking _running flag
                 socks = dict(poller.poll(timeout=500))  # 500ms timeout
+                
+                # Add explicit command queue processing here too, just to be sure
+                if self._running:  # Check again after polling
+                    self.process_command_queue()
                 
                 # Check for heartbeat timeout
                 current_time = time.time()
@@ -277,11 +412,19 @@ class EEGPredictionSubscriber(QtCore.QObject):
         if self.session_active:
             self.stop_session()
             
+        # Stop the command timer
+        if self.command_timer and self.command_timer.isActive():
+            self.command_timer.stop()
+            
         # Then stop the subscriber
         self._running = False
         
     def cleanup(self):
         """Clean up resources"""
+        # Stop the command timer
+        if self.command_timer and self.command_timer.isActive():
+            self.command_timer.stop()
+            
         if self.subscriber:
             self.subscriber.close()
             

@@ -62,6 +62,9 @@ ZMQ_PUBLISHER_ADDRESS = "tcp://*:5556"  # Address for app to connect to
 ZMQ_HEARTBEAT_INTERVAL = 1.0  # Send heartbeat every second
 ZMQ_PUBLISHER_SYNC_PORT = 5557  # Port for REP socket to confirm subscribers are ready
 
+PREDICTION_PUBLISH_INTERVAL = 1.0   # Base interval between published predictions (seconds)
+SIGNIFICANT_CHANGE_THRESHOLD = 0.15  # Only publish if state value changes by at least this amount
+
 # --- Global State ---
 running = True
 lsl_inlet = None
@@ -174,8 +177,9 @@ class ZMQPublisher:
 
 # --- EEG Processing ---
 class EEGProcessor:
-    def __init__(self, zmq_publisher):
+    def __init__(self, zmq_publisher, command_socket):
         self.zmq_publisher = zmq_publisher
+        self.command_socket = command_socket  # Add a reference to command socket
         self.lsl_inlet = None
         self.sampling_rate = DEFAULT_SAMPLING_RATE
         self.running = True
@@ -183,6 +187,9 @@ class EEGProcessor:
         self.is_calibrating = False
         self.current_session_type = None
         self.session_start_time = None
+
+        self.last_command_check = 0
+        self.command_check_interval = 0.2  # Check commands every 200ms
         
         # EEG processing state
         self.baseline_metrics = None
@@ -193,6 +200,11 @@ class EEGProcessor:
         # For buffer management
         self.eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
         self.buffer_timestamps = []
+
+        self.state_momentum = 0.75  # Higher = more resistance to state changes
+        self.state_velocity = 0.0   # Current rate of change
+        self.level_momentum = 0.8   # Higher = smoother level transitions
+        self.level_velocity = 0.0   # Current rate of level change
         
     def connect_to_lsl(self):
         """Connect to the LSL stream"""
@@ -686,34 +698,49 @@ class EEGProcessor:
         
         # Smooth classification with moving average if we have history
         if len(self.previous_states) > 1:
-            # Smooth the value
+            # Smooth the value with momentum-based approach
+            current_value = value
             recent_values = [s[1] for s in self.previous_states]
-            weights = np.exp(np.linspace(-1, 0, len(recent_values)))
-            weights /= weights.sum()
-            smooth_value = np.sum(weights * recent_values)
+            prev_value = recent_values[-2]  # Previous value
             
-            # Smooth the level - for temporal consistency
-            # Only change level if it's held for multiple samples or if change is gradual
+            # Calculate target velocity (difference from previous value)
+            target_velocity = current_value - prev_value
+            
+            # Apply momentum to velocity (gradual change in value)
+            self.state_velocity = (self.state_velocity * self.state_momentum + 
+                                target_velocity * (1 - self.state_momentum))
+            
+            # Apply smoothed velocity to get new value
+            smooth_value = prev_value + self.state_velocity
+            
+            # Ensure smooth_value stays in valid range
+            smooth_value = min(1.0, max(0.0, smooth_value))
+            
+            # Smooth the level with momentum-based approach
+            target_level = level
             recent_levels = [s[2] for s in self.previous_states]
-            current_level = level
+            prev_level = recent_levels[-2]
             
-            # If the new level is more than 1 step different from previous level, 
-            # ensure it persists for at least 2 samples before adopting
-            prev_level = recent_levels[-2] if len(recent_levels) > 1 else level
-            
-            if abs(level - prev_level) > 1:
-                # Level change is potentially too abrupt
-                # Keep the previous level unless the new level has appeared multiple times
-                level_counts = {}
-                for l in recent_levels[-3:]:  # Look at last 3 levels
-                    if l not in level_counts:
-                        level_counts[l] = 0
-                    level_counts[l] += 1
+            # Only apply heavy smoothing for large jumps
+            level_diff = target_level - prev_level
+            if abs(level_diff) > 1:
+                # Apply momentum to level changes
+                self.level_velocity = (self.level_velocity * self.level_momentum + 
+                                    level_diff * (1 - self.level_momentum))
                 
-                # If new level isn't frequent enough, use a transitional level
-                if level_counts.get(level, 0) < 2:
-                    # Move one step toward the new level from the previous level
-                    level = prev_level + (1 if level > prev_level else -1)
+                # Calculate smoothed level (allow partial steps)
+                smoothed_level_float = prev_level + self.level_velocity
+                
+                # Convert to integer but with special handling for transitions
+                if abs(smoothed_level_float - prev_level) < 0.5:
+                    # Not enough change to justify a level change yet
+                    level = prev_level
+                else:
+                    # Move one step in the right direction
+                    level = prev_level + (1 if level_diff > 0 else -1)
+            else:
+                # For small changes (1 level or less), allow immediate transitions
+                self.level_velocity = level_diff  # Reset velocity to match current change
         
         # Map state name to display name
         state_display_map = {
@@ -778,16 +805,23 @@ class EEGProcessor:
         
         calibration_start_time = time.time()
         last_heartbeat_time = time.time()
+        last_command_check = time.time()
         calibration_metrics_list = []
-        enough_samples = False  # Flag to track if we've collected enough samples
+        enough_samples = False
         
         # Collect calibration data
         while time.time() - calibration_start_time < CALIBRATION_DURATION_SECONDS and self.running:
-            # Send heartbeat
             current_time = time.time()
-            if current_time - last_heartbeat_time >= 0.5:
+            
+            # Send heartbeat more frequently
+            if current_time - last_heartbeat_time >= 0.2:  # More frequent heartbeats (200ms)
                 self.zmq_publisher.send_heartbeat()
                 last_heartbeat_time = current_time
+            
+            # Check for commands periodically
+            if current_time - last_command_check >= 0.2:
+                self.process_commands()
+                last_command_check = current_time
                 
             # Get data chunk
             chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
@@ -833,6 +867,8 @@ class EEGProcessor:
             max_buffer_size = int(self.sampling_rate * 10)  # Keep 10 seconds max
             if self.eeg_buffer.shape[1] > max_buffer_size:
                 self.eeg_buffer = self.eeg_buffer[:, -max_buffer_size:]
+
+            time.sleep(0.001)
         
         # Calculate baseline from calibration data
         if calibration_metrics_list:
@@ -883,14 +919,35 @@ class EEGProcessor:
             
     def process_commands(self):
         """Check for and process incoming commands (non-blocking)"""
-        # This would be implemented if we add a ZMQ SUB socket for commands
-        # For now, we just check if we need to calibrate based on session type changes
-        pass
+        if not self.command_socket:
+            return
+            
+        try:
+            # Use poll with a short timeout to make this non-blocking
+            poller = zmq.Poller()
+            poller.register(self.command_socket, zmq.POLLIN)
+            
+            if poller.poll(10):  # 10ms timeout
+                command = self.command_socket.recv_json(zmq.NOBLOCK)
+                logger.info(f"Received command during calibration: {command}")
+                
+                # Send immediate acknowledgement
+                self.command_socket.send_json({"status": "SUCCESS", "message": "Command received"})
+                
+                # We don't need to do anything else here since we're already calibrating
+                # Just log that we got the command
+        except zmq.Again:
+            # No command waiting
+            pass
+        except Exception as e:
+            logger.error(f"Error processing commands: {e}")
         
     def run_prediction_loop(self):
-        """Main processing loop for EEG prediction"""
+        """Main processing loop for EEG prediction with adaptive publishing"""
         last_prediction_time = 0
-        prediction_interval = ANALYSIS_WINDOW_SECONDS
+        last_published_time = 0
+        last_published_value = None
+        prediction_interval = ANALYSIS_WINDOW_SECONDS  # How often we analyze data
         
         while self.running:
             try:
@@ -903,67 +960,82 @@ class EEGProcessor:
                     time.sleep(0.1)
                     continue
                     
-                # Get data chunk
+                # Get and process data (unchanged)
                 chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
-                
                 if not chunk:
                     continue
                     
-                # ALWAYS add new data to buffer (unfiltered)
+                # Add to buffer (unchanged)
                 chunk_np = np.array(chunk, dtype=np.float64).T
                 eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
                 self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
                 
-                # Prune buffer (maintain sliding window)
-                max_buffer_size = int(self.sampling_rate * 10)  # 10 seconds
+                # Prune buffer (unchanged)
+                max_buffer_size = int(self.sampling_rate * 10)
                 if self.eeg_buffer.shape[1] > max_buffer_size:
                     self.eeg_buffer = self.eeg_buffer[:, -max_buffer_size:]
                 
-                # Process only if:
-                # 1. Enough time has passed since last prediction
-                # 2. We have enough data for proper analysis
+                # Analyze data at regular intervals
                 current_time = time.time()
                 if (current_time - last_prediction_time >= prediction_interval and 
                         self.eeg_buffer.shape[1] >= self.nfft):
                     
-                    # Process the most recent window of data
+                    # Process the data (unchanged)
                     window_for_analysis = self.eeg_buffer[:, -self.nfft:]
-                    
-                    # Filter the entire window
                     filtered_window = self.filter_eeg_data(window_for_analysis)
-                    
-                    # Calculate metrics on filtered window
                     current_metrics = self.calculate_band_powers(filtered_window)
                     
                     if current_metrics:
-                        # Update metrics history
+                        # Update history (unchanged)
                         self.recent_metrics_history.append(current_metrics)
                         if len(self.recent_metrics_history) > MAX_HISTORY_SIZE:
                             self.recent_metrics_history.pop(0)
                             
-                        # Adapt baseline if appropriate
+                        # Adapt baseline (unchanged)
                         if self.is_calibrated and not self.is_calibrating:
                             self.adapt_baseline(current_metrics)
                             
                         # Classify mental state
                         classification = self.classify_mental_state(current_metrics)
                         
-                        # Publish prediction
-                        prediction_data = {
-                            "message_type": "PREDICTION",
-                            "timestamp": current_time,
-                            "session_type": self.current_session_type,
-                            "classification": classification,
-                            "metrics": {
-                                "alpha": round(current_metrics['alpha'], 3),
-                                "beta": round(current_metrics['beta'], 3),
-                                "theta": round(current_metrics['theta'], 3),
-                                "ab_ratio": round(current_metrics['ab_ratio'], 3),
-                                "bt_ratio": round(current_metrics['bt_ratio'], 3)
-                            }
-                        }
+                        # NEW: Determine if we should publish this prediction
+                        should_publish = False
                         
-                        self.zmq_publisher.publish_message(prediction_data)
+                        # 1. Publish if minimum time has elapsed
+                        if current_time - last_published_time >= PREDICTION_PUBLISH_INTERVAL:
+                            should_publish = True
+                        
+                        # 2. Or publish if state has changed significantly
+                        current_value = classification.get("smooth_value", 0.5)
+                        if (last_published_value is not None and 
+                                abs(current_value - last_published_value) > SIGNIFICANT_CHANGE_THRESHOLD):
+                            should_publish = True
+                        
+                        # 3. Always publish the first prediction
+                        if last_published_value is None:
+                            should_publish = True
+                        
+                        # Publish if criteria met
+                        if should_publish:
+                            prediction_data = {
+                                "message_type": "PREDICTION",
+                                "timestamp": current_time,
+                                "session_type": self.current_session_type,
+                                "classification": classification,
+                                "metrics": {
+                                    "alpha": round(current_metrics['alpha'], 3),
+                                    "beta": round(current_metrics['beta'], 3),
+                                    "theta": round(current_metrics['theta'], 3),
+                                    "ab_ratio": round(current_metrics['ab_ratio'], 3),
+                                    "bt_ratio": round(current_metrics['bt_ratio'], 3)
+                                }
+                            }
+                            
+                            self.zmq_publisher.publish_message(prediction_data)
+                            last_published_time = current_time
+                            last_published_value = current_value
+                        
+                        # Update prediction time regardless of publishing
                         last_prediction_time = current_time
                         
             except Exception as e:
@@ -1086,56 +1158,106 @@ class CommandReceiver:
 
 # --- Main Function ---
 def main():
-    # Initialize ZMQ publisher
-    zmq_publisher = ZMQPublisher()
+    # Create ZMQ context and publisher
+    zmq_context = zmq.Context()
+    zmq_publisher = ZMQPublisher(ZMQ_PUBLISHER_ADDRESS, ZMQ_PUBLISHER_SYNC_PORT)
     
-    # Initialize EEG processor
-    eeg_processor = EEGProcessor(zmq_publisher)
+    # Create command socket
+    command_socket = zmq_context.socket(zmq.REP)
+    command_socket.bind("tcp://*:5558")
+    logger.info("Command receiver bound to tcp://*:5558")
     
-    # Initialize command receiver
-    command_receiver = CommandReceiver(eeg_processor)
+    # Create EEG processor with reference to command socket
+    eeg_processor = EEGProcessor(zmq_publisher, command_socket)
     
+    # Wait for subscribers
+    logger.info("Waiting for subscribers...")
+    zmq_publisher.wait_for_subscribers()
+    
+    # Setup poller for command socket
+    poller = zmq.Poller()
+    poller.register(command_socket, zmq.POLLIN)
+    
+    # Main processing loop
     try:
-        # Wait for at least one subscriber to connect (timeout after 10 seconds)
-        subscriber_connected = zmq_publisher.wait_for_subscribers(timeout=10.0)
-        if not subscriber_connected:
-            logger.warning("No subscribers connected within timeout period. Continuing anyway...")
-        
-        # Continuously process commands and predictions
         while eeg_processor.running:
-            # Process any pending commands
-            command_receiver.process_commands()
+            # Check for commands with timeout
+            socks = dict(poller.poll(timeout=100))  # 100ms timeout
             
-            # Check if command receiver is still running
-            if not command_receiver.running:
-                eeg_processor.running = False
-                logger.info("Command receiver has stopped. Exiting...")
-                break
-                
-            # If we have an active session, process EEG data
-            if eeg_processor.current_session_type:
-                # If not calibrated, perform calibration
-                if not eeg_processor.is_calibrated and not eeg_processor.is_calibrating:
-                    logger.info("Performing calibration...")
-                    eeg_processor.perform_calibration(eeg_processor.current_session_type)
+            if command_socket in socks and socks[command_socket] == zmq.POLLIN:
+                try:
+                    command = command_socket.recv_json()
+                    logger.info(f"Received command: {command}")
                     
-                # Process one chunk of data
+                    if command.get('command') == 'START_SESSION':
+                        session_type = command.get('session_type', 'GENERIC')
+                        
+                        # Start LSL stream if not already running
+                        if eeg_processor.lsl_inlet is None:
+                            eeg_processor.connect_to_lsl()
+                        
+                        # Send an immediate acknowledgement
+                        command_socket.send_json({
+                            'status': 'SUCCESS',
+                            'message': f'Starting {session_type} session'
+                        })
+                        
+                        # Perform calibration
+                        eeg_processor.perform_calibration(session_type)
+                        
+                    elif command.get('command') == 'STOP_SESSION':
+                        # Handle stop command
+                        eeg_processor.stop_session()
+                        command_socket.send_json({
+                            'status': 'SUCCESS',
+                            'message': 'Session stopped'
+                        })
+                        
+                    elif command.get('command') == 'SHUTDOWN':
+                        # Handle shutdown command
+                        eeg_processor.running = False
+                        command_socket.send_json({
+                            'status': 'SUCCESS',
+                            'message': 'Shutting down'
+                        })
+                        
+                    else:
+                        # Unknown command
+                        command_socket.send_json({
+                            'status': 'ERROR',
+                            'message': 'Unknown command'
+                        })
+                        
+                except Exception as e:
+                    logger.error(f"Error handling command: {e}")
+                    try:
+                        command_socket.send_json({
+                            'status': 'ERROR',
+                            'message': str(e)
+                        })
+                    except:
+                        pass
+                        
+            # Process incoming EEG data (if not calibrating)
+            if eeg_processor.lsl_inlet and eeg_processor.is_calibrated and not eeg_processor.is_calibrating:
                 eeg_processor.run_prediction_loop()
-            else:
-                # No active session, just wait a bit
-                time.sleep(0.1)
                 
+            # Send heartbeat periodically
+            zmq_publisher.send_heartbeat()
+            
+            # Small sleep to prevent CPU spiking
+            time.sleep(0.01)
+            
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received. Shutting down...")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.info("Keyboard interrupt received, shutting down.")
     finally:
         # Cleanup
-        logger.info("Cleaning up resources...")
-        command_receiver.cleanup()
-        eeg_processor.cleanup()
+        eeg_processor.running = False
         zmq_publisher.cleanup()
-        logger.info("EEG Backend Processor terminated")
+        if command_socket:
+            command_socket.close()
+        if zmq_context:
+            zmq_context.term()
 
 if __name__ == "__main__":
     main()
