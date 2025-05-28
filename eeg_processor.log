@@ -1726,3 +1726,86 @@
 2025-05-27 17:55:21,760 - EEG_Processor - INFO - Collected enough samples for processing: 2052
 2025-05-27 17:55:35,053 - EEG_Processor - INFO - Calibration complete: Alpha=4.96, Beta=4.05
 2025-05-27 17:57:07,259 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 19:30:38,498 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 19:30:38,499 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 19:30:38,502 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 19:30:38,502 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 19:30:38,502 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 19:30:39,397 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 19:30:39,398 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 19:30:40,533 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-27 19:30:40,533 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 19:30:40,569 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 19:30:40,570 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-27 19:30:47,335 - EEG_Processor - INFO - Collected enough samples for processing: 2052
+2025-05-27 19:31:00,597 - EEG_Processor - INFO - Calibration complete: Alpha=5.45, Beta=4.01
+2025-05-27 19:32:06,256 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 19:32:19,204 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 19:32:19,205 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 19:32:19,207 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 19:32:19,208 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 19:32:19,208 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 19:32:19,626 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 19:32:19,627 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 19:32:19,758 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-27 19:32:19,758 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 19:32:19,795 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 19:32:19,796 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-27 19:32:26,558 - EEG_Processor - INFO - Collected enough samples for processing: 2052
+2025-05-27 19:32:39,803 - EEG_Processor - INFO - Calibration complete: Alpha=4.17, Beta=3.73
+2025-05-27 19:33:10,023 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 22:06:06,791 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 22:06:06,793 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 22:06:06,795 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 22:06:06,795 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 22:06:06,795 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 22:06:07,139 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 22:06:07,139 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 22:06:08,251 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'FOCUS'}
+2025-05-27 22:06:08,251 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 22:06:08,284 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 22:06:08,285 - EEG_Processor - INFO - Starting calibration for session type: FOCUS
+2025-05-27 22:06:15,173 - EEG_Processor - INFO - Collected enough samples for processing: 2070
+2025-05-27 22:06:16,365 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 23:11:08,420 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 23:11:08,421 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 23:11:08,424 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 23:11:08,424 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:11:08,424 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:11:09,066 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 23:11:09,067 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 23:11:10,206 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-27 23:11:10,206 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 23:11:10,237 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 23:11:10,238 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-27 23:11:17,114 - EEG_Processor - INFO - Collected enough samples for processing: 2070
+2025-05-27 23:11:30,370 - EEG_Processor - INFO - Calibration complete: Alpha=4.24, Beta=4.11
+2025-05-27 23:13:51,957 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 23:14:12,768 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 23:14:12,769 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 23:14:12,772 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 23:14:12,772 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:14:12,772 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:14:13,160 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 23:14:13,160 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 23:14:13,293 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'RELAXATION'}
+2025-05-27 23:14:13,293 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 23:14:13,335 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 23:14:13,335 - EEG_Processor - INFO - Starting calibration for session type: RELAXATION
+2025-05-27 23:14:20,107 - EEG_Processor - INFO - Collected enough samples for processing: 2052
+2025-05-27 23:14:33,452 - EEG_Processor - INFO - Calibration complete: Alpha=4.81, Beta=4.50
+2025-05-27 23:15:07,438 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}
+2025-05-27 23:16:10,650 - EEG_Processor - INFO - ZMQ Publisher bound to tcp://*:5556
+2025-05-27 23:16:10,651 - EEG_Processor - INFO - ZMQ Sync socket bound to port 5557
+2025-05-27 23:16:10,653 - EEG_Processor - INFO - Command receiver bound to tcp://*:5558
+2025-05-27 23:16:10,654 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:16:10,654 - EEG_Processor - INFO - Waiting for subscribers...
+2025-05-27 23:16:11,078 - EEG_Processor - INFO - Received sync request: SYNC
+2025-05-27 23:16:11,078 - EEG_Processor - INFO - Subscriber synchronized!
+2025-05-27 23:16:12,193 - EEG_Processor - INFO - Received command: {'command': 'START_SESSION', 'session_type': 'FOCUS'}
+2025-05-27 23:16:12,193 - EEG_Processor - INFO - Looking for LSL stream (Type: 'EEG')...
+2025-05-27 23:16:12,225 - EEG_Processor - INFO - Connected to 'MuseSimulator' @ 311.47 Hz. NFFT=2048
+2025-05-27 23:16:12,225 - EEG_Processor - INFO - Starting calibration for session type: FOCUS
+2025-05-27 23:16:18,993 - EEG_Processor - INFO - Collected enough samples for processing: 2052
+2025-05-27 23:16:32,258 - EEG_Processor - INFO - Calibration complete: Alpha=5.65, Beta=4.66
+2025-05-27 23:33:00,555 - EEG_Processor - INFO - Received command during calibration: {'command': 'SHUTDOWN'}

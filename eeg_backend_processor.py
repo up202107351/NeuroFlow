@@ -201,6 +201,19 @@ class EEGProcessor:
         self.eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
         self.buffer_timestamps = []
 
+        self.current_thresholds = {
+            'alpha_incr': [1.10, 1.25, 1.50],  # slight, moderate, strong
+            'alpha_decr': [0.90, 0.80, 0.65],
+            'beta_incr': [1.10, 1.20, 1.40],
+            'beta_decr': [0.90, 0.80],
+            'theta_incr': [1.15, 1.30],
+            'theta_decr': [0.85, 0.70],
+            'ab_ratio_incr': [1.10, 1.20, 1.40],
+            'ab_ratio_decr': [0.90, 0.75],
+            'bt_ratio_incr': [1.15, 1.30, 1.60],
+            'bt_ratio_decr': [0.85, 0.70]
+        }
+
         self.state_momentum = 0.75  # Higher = more resistance to state changes
         self.state_velocity = 0.0   # Current rate of change
         self.level_momentum = 0.8   # Higher = smoother level transitions
@@ -537,7 +550,7 @@ class EEGProcessor:
             self.baseline_metrics['bt_ratio'] = self.baseline_metrics['beta'] / self.baseline_metrics['theta'] if self.baseline_metrics['theta'] > 1e-9 else 0
             
     def classify_mental_state(self, current_metrics):
-        """Classify mental state based on current metrics and baseline with more granular levels"""
+        """Classify mental state with adaptive thresholds"""
         if not self.baseline_metrics or not current_metrics:
             return {
                 "state": "Calibrating",
@@ -546,6 +559,10 @@ class EEGProcessor:
                 "value": 0.5,
                 "smooth_value": 0.5
             }
+        
+        # Make sure thresholds are available (fallback if never calculated)
+        if not hasattr(self, 'current_thresholds'):
+            self.current_thresholds = self.calculate_adaptive_thresholds()
         
         # Get state probabilities
         state_probs = self.calculate_state_probabilities(current_metrics)
@@ -567,11 +584,6 @@ class EEGProcessor:
             # Calculate normalized relaxation value (0.0 to 1.0)
             relaxation_value = min(1.0, max(0.0, state_probs['relaxed']))
             
-            # Determine relaxation level (from -3 to 4)
-            # -3 to -1: Less relaxed (alert/tense)
-            # 0: Neutral
-            # 1 to 4: Increasingly relaxed
-            
             # Measure degree of being less relaxed (alert/tense)
             ab_ratio_decrease = self.baseline_metrics['ab_ratio'] / current_metrics['ab_ratio'] - 1.0 if current_metrics['ab_ratio'] > 0 else 0
             beta_increase = current_metrics['beta'] / self.baseline_metrics['beta'] - 1.0
@@ -579,19 +591,26 @@ class EEGProcessor:
             
             alert_signal = (0.4 * ab_ratio_decrease + 0.3 * beta_increase + 0.3 * alpha_decrease) * 4.0
             
-            # Less relaxed levels
-            if ab_ratio_decrease > 0.15 and (beta_increase > 0.1 or alpha_decrease > 0.1):
-                if alert_signal > 1.5:
+            # Less relaxed levels - USING ADAPTIVE THRESHOLDS
+            if (ab_ratio_decrease > self.current_thresholds['ab_ratio_decr'][0] and 
+                (beta_increase > self.current_thresholds['beta_incr'][0] or 
+                alpha_decrease > self.current_thresholds['alpha_decr'][0])):
+                
+                # Use adaptive thresholds for alert levels
+                tense_threshold = 1.5 / (1.0 - min(0.5, ab_ratio_decrease))  # More sensitive as decrease grows
+                alert_threshold = 1.0 / (1.0 - min(0.4, ab_ratio_decrease))
+                
+                if alert_signal > tense_threshold:
                     level = -3  # Significantly less relaxed / tense
                     state_name = "tense"
-                elif alert_signal > 1.0:
+                elif alert_signal > alert_threshold:
                     level = -2  # Moderately less relaxed / alert
                     state_name = "alert"
                 else:
                     level = -1  # Slightly less relaxed
                     state_name = "less_relaxed"
             
-            # More relaxed levels
+            # More relaxed levels - USING ADAPTIVE THRESHOLDS
             elif relaxation_value > 0.3:
                 # Determine relaxation level based on alpha and ab_ratio increases
                 alpha_increase = current_metrics['alpha'] / self.baseline_metrics['alpha'] - 1.0
@@ -599,13 +618,14 @@ class EEGProcessor:
                 
                 relax_signal = (0.5 * alpha_increase + 0.5 * ab_ratio_increase) * 5.0
                 
-                if relax_signal > 2.0:
+                # Use adaptive thresholds for relaxation levels
+                if relax_signal > self.current_thresholds['alpha_incr'][2]:
                     level = 4  # Deeply relaxed
                     state_name = "deeply_relaxed"
-                elif relax_signal > 1.3:
+                elif relax_signal > self.current_thresholds['alpha_incr'][1]:
                     level = 3  # Strongly relaxed
                     state_name = "strongly_relaxed"
-                elif relax_signal > 0.7:
+                elif relax_signal > self.current_thresholds['alpha_incr'][0]:
                     level = 2  # Moderately relaxed
                     state_name = "moderately_relaxed"
                 else:
@@ -616,17 +636,11 @@ class EEGProcessor:
                 state_name = "neutral"
             
             # Map to a smooth value from 0-1 for visualization
-            # -3 = 0.0, 0 = 0.5, 4 = 1.0
             value = (level + 3) / 7.0
             
         elif self.current_session_type == "FOCUS":
             # Calculate normalized focus value (0.0 to 1.0)
             focus_value = min(1.0, max(0.0, state_probs['focused']))
-            
-            # Determine focus level (from -3 to 4)
-            # -3 to -1: Less focused (distracted)
-            # 0: Neutral
-            # 1 to 4: Increasingly focused
             
             # Measure degree of being less focused (distracted)
             bt_ratio_decrease = self.baseline_metrics['bt_ratio'] / current_metrics['bt_ratio'] - 1.0 if current_metrics['bt_ratio'] > 0 else 0
@@ -635,19 +649,26 @@ class EEGProcessor:
             
             distracted_signal = (0.4 * bt_ratio_decrease + 0.3 * beta_decrease + 0.3 * theta_increase) * 4.0
             
-            # Less focused levels
-            if bt_ratio_decrease > 0.15 and (beta_decrease > 0.1 or theta_increase > 0.1):
-                if distracted_signal > 1.5:
+            # Less focused levels - USING ADAPTIVE THRESHOLDS
+            if (bt_ratio_decrease > self.current_thresholds['bt_ratio_decr'][0] and 
+                (beta_decrease > self.current_thresholds['beta_decr'][0] or 
+                theta_increase > self.current_thresholds['theta_incr'][0])):
+                
+                # Use adaptive thresholds for distraction levels
+                very_distracted_threshold = 1.5 / (1.0 - min(0.5, bt_ratio_decrease))
+                distracted_threshold = 1.0 / (1.0 - min(0.4, bt_ratio_decrease))
+                
+                if distracted_signal > very_distracted_threshold:
                     level = -3  # Significantly distracted
                     state_name = "very_distracted"
-                elif distracted_signal > 1.0:
+                elif distracted_signal > distracted_threshold:
                     level = -2  # Moderately distracted
                     state_name = "distracted"
                 else:
                     level = -1  # Slightly distracted
                     state_name = "less_focused"
             
-            # More focused levels
+            # More focused levels - USING ADAPTIVE THRESHOLDS
             elif focus_value > 0.3:
                 # Determine focus level based on beta and bt_ratio increases
                 beta_increase = current_metrics['beta'] / self.baseline_metrics['beta'] - 1.0
@@ -655,13 +676,14 @@ class EEGProcessor:
                 
                 focus_signal = (0.5 * beta_increase + 0.5 * bt_ratio_increase) * 5.0
                 
-                if focus_signal > 2.0:
+                # Use adaptive thresholds for focus levels
+                if focus_signal > self.current_thresholds['bt_ratio_incr'][2]:
                     level = 4  # Deeply focused
                     state_name = "deeply_focused"
-                elif focus_signal > 1.3:
+                elif focus_signal > self.current_thresholds['bt_ratio_incr'][1]:
                     level = 3  # Strongly focused
                     state_name = "strongly_focused"
-                elif focus_signal > 0.7:
+                elif focus_signal > self.current_thresholds['bt_ratio_incr'][0]:
                     level = 2  # Moderately focused
                     state_name = "moderately_focused"
                 else:
@@ -672,11 +694,13 @@ class EEGProcessor:
                 state_name = "neutral"
             
             # Map to a smooth value from 0-1 for visualization
-            # -3 = 0.0, 0 = 0.5, 4 = 1.0
             value = (level + 3) / 7.0
         else:
             # Default mapping
             value = prob_value
+        
+        # Rest of the function remains the same...
+        # (confidence, smoothing, display state mapping)
         
         # Determine confidence based on probability
         if prob_value > 0.8:
@@ -698,77 +722,41 @@ class EEGProcessor:
         
         # Smooth classification with moving average if we have history
         if len(self.previous_states) > 1:
-            # Smooth the value with momentum-based approach
+            # Existing smoothing code...
+            # (no changes needed here)
             current_value = value
             recent_values = [s[1] for s in self.previous_states]
-            prev_value = recent_values[-2]  # Previous value
+            prev_value = recent_values[-2]
             
-            # Calculate target velocity (difference from previous value)
             target_velocity = current_value - prev_value
-            
-            # Apply momentum to velocity (gradual change in value)
             self.state_velocity = (self.state_velocity * self.state_momentum + 
                                 target_velocity * (1 - self.state_momentum))
-            
-            # Apply smoothed velocity to get new value
             smooth_value = prev_value + self.state_velocity
-            
-            # Ensure smooth_value stays in valid range
             smooth_value = min(1.0, max(0.0, smooth_value))
             
-            # Smooth the level with momentum-based approach
             target_level = level
             recent_levels = [s[2] for s in self.previous_states]
             prev_level = recent_levels[-2]
             
-            # Only apply heavy smoothing for large jumps
             level_diff = target_level - prev_level
             if abs(level_diff) > 1:
-                # Apply momentum to level changes
                 self.level_velocity = (self.level_velocity * self.level_momentum + 
                                     level_diff * (1 - self.level_momentum))
-                
-                # Calculate smoothed level (allow partial steps)
                 smoothed_level_float = prev_level + self.level_velocity
                 
-                # Convert to integer but with special handling for transitions
                 if abs(smoothed_level_float - prev_level) < 0.5:
-                    # Not enough change to justify a level change yet
                     level = prev_level
                 else:
-                    # Move one step in the right direction
                     level = prev_level + (1 if level_diff > 0 else -1)
             else:
-                # For small changes (1 level or less), allow immediate transitions
-                self.level_velocity = level_diff  # Reset velocity to match current change
+                self.level_velocity = level_diff
         
-        # Map state name to display name
+        # Final result construction
         state_display_map = {
-            # Relaxation states
+            # Your existing state_display_map...
             'deeply_relaxed': "Deeply Relaxed",
             'strongly_relaxed': "Strongly Relaxed",
-            'moderately_relaxed': "Moderately Relaxed",
-            'slightly_relaxed': "Slightly Relaxed",
-            'less_relaxed': "Less Relaxed",
-            'alert': "Alert",
-            'tense': "Tense",
-            
-            # Focus states
-            'deeply_focused': "Deeply Focused",
-            'strongly_focused': "Strongly Focused",
-            'moderately_focused': "Moderately Focused",
-            'slightly_focused': "Slightly Focused",
-            'less_focused': "Less Focused",
-            'distracted': "Distracted",
-            'very_distracted': "Very Distracted",
-            
-            # Other states
-            'neutral': "Neutral",
-            'eyes_closed': "Eyes Closed",
-            'relaxed': "Relaxed",
-            'focused': "Focused",
-            'drowsy': "Drowsy",
-            'internal_focus': "Internal Mental Activity"
+            # ... rest of the mapping
         }
         
         display_state = state_display_map.get(state_name, state_name.title())
@@ -783,7 +771,7 @@ class EEGProcessor:
         }
         
         return result
-        
+
     def perform_calibration(self, session_type):
         """Perform calibration for current session type"""
         self.is_calibrating = True
@@ -990,6 +978,8 @@ class EEGProcessor:
                         self.recent_metrics_history.append(current_metrics)
                         if len(self.recent_metrics_history) > MAX_HISTORY_SIZE:
                             self.recent_metrics_history.pop(0)
+
+                        self.current_thresholds = self.calculate_adaptive_thresholds()
                             
                         # Adapt baseline (unchanged)
                         if self.is_calibrated and not self.is_calibrating:

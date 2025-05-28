@@ -165,8 +165,10 @@ class FocusPageWidget(QtWidgets.QWidget):
             tooltip_text = user_tooltip
         
         # Update button states
-        enabled = is_lsl_connected_from_main_app and self.user_id is not None
-        
+        enabled = is_lsl_connected_from_main_app #and self.user_id is not None
+
+        print(f"Focus Page: Updating button tooltips and states. LSL Connected: {is_lsl_connected_from_main_app}, User ID: {self.user_id}")
+        enabled = True
         if hasattr(self, 'btn_work_session'):
             self.btn_work_session.setToolTip(tooltip_text)
             self.btn_work_session.setEnabled(enabled)
