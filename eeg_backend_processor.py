@@ -148,6 +148,10 @@ class ZMQPublisher:
     def publish_message(self, message_dict):
         """Publish a message to subscribers"""
         try:
+            # Add a precise send timestamp for latency measurement
+            if message_dict.get("message_type") == "PREDICTION":
+                message_dict["send_timestamp"] = time.time()
+            
             self.publisher.send_json(message_dict)
             return True
         except Exception as e:
@@ -218,6 +222,16 @@ class EEGProcessor:
         self.state_velocity = 0.0   # Current rate of change
         self.level_momentum = 0.8   # Higher = smoother level transitions
         self.level_velocity = 0.0   # Current rate of level change
+
+        self.session_eeg_data = []  # Store raw EEG data
+        self.session_band_data = {
+            "alpha": [],
+            "beta": [],
+            "theta": [],
+            "ab_ratio": [],
+            "bt_ratio": []
+        }
+        self.session_timestamps = []
         
     def connect_to_lsl(self):
         """Connect to the LSL stream"""
@@ -1007,20 +1021,83 @@ class EEGProcessor:
                         
                         # Publish if criteria met
                         if should_publish:
-                            prediction_data = {
-                                "message_type": "PREDICTION",
-                                "timestamp": current_time,
-                                "session_type": self.current_session_type,
-                                "classification": classification,
-                                "smooth_value": round(classification['smooth_value'], 3),
-                                "metrics": {
-                                    "alpha": round(current_metrics['alpha'], 3),
-                                    "beta": round(current_metrics['beta'], 3),
-                                    "theta": round(current_metrics['theta'], 3),
-                                    "ab_ratio": round(current_metrics['ab_ratio'], 3),
-                                    "bt_ratio": round(current_metrics['bt_ratio'], 3)
+                            # Get new data since last sent
+                            current_buffer_size = self.eeg_buffer.shape[1]
+                            
+                            # Initialize last_sent_sample_index if not present
+                            if not hasattr(self, 'last_sent_sample_index'):
+                                self.last_sent_sample_index = max(0, current_buffer_size - int(self.sampling_rate))
+                            
+                            # Check if we have new data to send
+                            if current_buffer_size > self.last_sent_sample_index:
+                                # Extract new EEG data (no overlap with previous sends)
+                                new_data_start = self.last_sent_sample_index
+                                new_data_end = current_buffer_size
+                                
+                                # Extract a slice of EEG data (downsample to save bandwidth if needed)
+                                downsample_factor = 4  # Adjust based on your needs
+                                new_eeg_data = self.eeg_buffer[:, new_data_start:new_data_end:downsample_factor].tolist()
+                                
+                                # Calculate sample timestamps
+                                current_time = time.time()
+                                sample_interval = 1.0 / (self.sampling_rate / downsample_factor)
+                                num_samples = len(new_eeg_data[0]) if new_eeg_data and new_eeg_data[0] else 0
+                                sample_timestamps = [current_time - (num_samples - i - 1) * sample_interval 
+                                                    for i in range(num_samples)]
+                                
+                                # Update last sent index for next time
+                                self.last_sent_sample_index = current_buffer_size
+                                
+                                # Include band data for this segment
+                                band_data = {
+                                    "alpha": [round(current_metrics['alpha'], 3)],
+                                    "beta": [round(current_metrics['beta'], 3)],
+                                    "theta": [round(current_metrics['theta'], 3)],
+                                    "ab_ratio": [round(current_metrics['ab_ratio'], 3)],
+                                    "bt_ratio": [round(current_metrics['bt_ratio'], 3)]
                                 }
-                            }
+                                
+                                # Construct prediction message with new samples
+                                prediction_data = {
+                                    "message_type": "PREDICTION",
+                                    "timestamp": current_time,
+                                    "send_timestamp": time.time(),  # For latency measurement
+                                    "session_type": self.current_session_type,
+                                    "classification": classification,
+                                    "smooth_value": round(classification['smooth_value'], 3),
+                                    "metrics": {
+                                        "alpha": round(current_metrics['alpha'], 3),
+                                        "beta": round(current_metrics['beta'], 3),
+                                        "theta": round(current_metrics['theta'], 3),
+                                        "ab_ratio": round(current_metrics['ab_ratio'], 3),
+                                        "bt_ratio": round(current_metrics['bt_ratio'], 3)
+                                    },
+                                    "band_data": band_data,
+                                    "new_samples": {
+                                        "eeg_data": new_eeg_data,
+                                        "timestamps": sample_timestamps,
+                                        "start_index": new_data_start,
+                                        "end_index": new_data_end,
+                                        "downsample_factor": downsample_factor
+                                    }
+                                }
+                            else:
+                                # No new data to send
+                                prediction_data = {
+                                    "message_type": "PREDICTION",
+                                    "timestamp": current_time,
+                                    "send_timestamp": time.time(),  # For latency measurement
+                                    "session_type": self.current_session_type,
+                                    "classification": classification,
+                                    "smooth_value": round(classification['smooth_value'], 3),
+                                    "metrics": {
+                                        "alpha": round(current_metrics['alpha'], 3),
+                                        "beta": round(current_metrics['beta'], 3),
+                                        "theta": round(current_metrics['theta'], 3),
+                                        "ab_ratio": round(current_metrics['ab_ratio'], 3),
+                                        "bt_ratio": round(current_metrics['bt_ratio'], 3)
+                                    }
+                                }
                             
                             self.zmq_publisher.publish_message(prediction_data)
                             last_published_time = current_time
@@ -1028,6 +1105,22 @@ class EEGProcessor:
                         
                         # Update prediction time regardless of publishing
                         last_prediction_time = current_time
+
+                        # Store band data for the session
+                        for band in ["alpha", "beta", "theta", "ab_ratio", "bt_ratio"]:
+                            self.session_band_data[band].append(round(current_metrics[band], 3))
+                        
+                        # Store timestamps for new data
+                        current_time = time.time()
+                        self.session_timestamps.append(current_time)
+                        
+                        # Store downsampled EEG data (1:4 downsampling to keep message size reasonable)
+                        if self.eeg_buffer.shape[1] >= self.nfft:
+                            # Store just the last second of data
+                            seconds_to_store = 1
+                            samples_to_store = int(self.sampling_rate * seconds_to_store)
+                            data_to_store = self.eeg_buffer[:, -samples_to_store::4]  # Downsample by taking every 4th sample
+                            self.session_eeg_data.append(data_to_store.tolist())
                         
             except Exception as e:
                 logger.error(f"Error in prediction loop: {e}")
@@ -1059,19 +1152,68 @@ class EEGProcessor:
         return self.perform_calibration(session_type)
         
     def stop_session(self):
-        """Stop the current session"""
+        """Stop the current session and send all collected data"""
+        if self.current_session_type:
+            # Send session data message with all accumulated data
+            if hasattr(self, 'session_eeg_data') and self.session_eeg_data:
+                # Send session data in chunks if it's large
+                self._send_session_data_in_chunks()
+            
+            # Send session ended message
+            self.zmq_publisher.publish_message({
+                "message_type": "SESSION_STATUS",
+                "status": "ENDED",
+                "timestamp": time.time()
+            })
+        
         self.current_session_type = None
         self.session_start_time = None
         
-        # Send session ended message
-        self.zmq_publisher.publish_message({
-            "message_type": "SESSION_STATUS",
-            "status": "ENDED",
-            "timestamp": time.time()
-        })
+        # Reset session data collections
+        self.session_eeg_data = []
+        self.session_band_data = {
+            "alpha": [],
+            "beta": [],
+            "theta": [],
+            "ab_ratio": [],
+            "bt_ratio": []
+        }
+        self.session_timestamps = []
         
         logger.info("Session stopped")
         return True
+
+    def _send_session_data_in_chunks(self, chunk_size=1000):
+        """Send session data in manageable chunks to avoid message size limits"""
+        session_data_msg = {
+            "message_type": "SESSION_DATA",
+            "session_type": self.current_session_type,
+            "timestamp": time.time(),
+            "sampling_rate": self.sampling_rate,
+            "total_chunks": len(self.session_band_data['alpha']),
+            "band_data": self.session_band_data,
+            "timestamps": self.session_timestamps
+        }
+        
+        # Send band data (usually small enough to send in one message)
+        self.zmq_publisher.publish_message(session_data_msg)
+        
+        # Send EEG data in chunks
+        total_eeg_chunks = len(self.session_eeg_data)
+        for i in range(0, total_eeg_chunks, chunk_size):
+            end_idx = min(i + chunk_size, total_eeg_chunks)
+            eeg_chunk_msg = {
+                "message_type": "SESSION_EEG_DATA",
+                "session_type": self.current_session_type,
+                "timestamp": time.time(),
+                "chunk_index": i // chunk_size,
+                "total_chunks": (total_eeg_chunks + chunk_size - 1) // chunk_size,
+                "eeg_data": self.session_eeg_data[i:end_idx],
+                "timestamps": self.session_timestamps[i:end_idx]
+            }
+            self.zmq_publisher.publish_message(eeg_chunk_msg)
+            # Small delay to avoid overwhelming the receiver
+            time.sleep(0.05)
         
     def cleanup(self):
         """Cleanup resources"""

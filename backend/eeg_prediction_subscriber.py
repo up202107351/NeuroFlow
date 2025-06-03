@@ -12,6 +12,14 @@ import logging
 import numpy as np
 from PyQt5 import QtCore
 import queue
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import datetime
+import os
+from PyQt5 import QtWidgets
+from backend import database_manager as db_manager  # Import your database manager module
 
 # Set up logging
 logging.basicConfig(
@@ -49,6 +57,23 @@ class EEGPredictionSubscriber(QtCore.QObject):
         self.current_session_type = None
         self.command_queue = queue.Queue()  # Queue for non-blocking commands
         self.command_timer = None  # Timer for processing commands
+        
+        #For latency testing
+        self.latency_testing = False
+        self.latency_measurements = []
+        self.max_latency_measurements = 5
+
+        # To receive eeg data
+        self.session_band_data = {
+        "alpha": [],
+        "beta": [],
+        "theta": [],
+        "ab_ratio": [],
+        "bt_ratio": []
+        }
+        self.session_eeg_data = []
+        self.session_eeg_timestamps = []
+        self.new_band_data_available = QtCore.pyqtSignal(dict)  # New signal
         
     def send_command(self, command_dict):
         """Send a command to the EEG backend processor"""
@@ -282,7 +307,40 @@ class EEGPredictionSubscriber(QtCore.QObject):
         except Exception as e:
             logger.error(f"Error processing command queue: {e}")
             self.subscriber_error.emit(f"Command processing error: {e}")
-    
+
+    def start_latency_test(self, max_trials=5):
+        """Start latency testing"""
+        print("Starting ZMQ latency test...")
+        self.latency_measurements = []
+        self.max_latency_measurements = max_trials
+        self.latency_testing = True
+
+    def process_latency_measurement(self, message_json, receive_time):
+        """Process latency measurement from a prediction message"""
+        # Only process if we're in testing mode
+        if not hasattr(self, 'latency_testing') or not self.latency_testing:
+            return
+            
+        if not hasattr(self, 'latency_measurements'):
+            self.latency_measurements = []
+            
+        if len(self.latency_measurements) >= getattr(self, 'max_latency_measurements', 5):
+            return
+            
+        # If this is a prediction with a send timestamp
+        if "send_timestamp" in message_json:
+            send_time = message_json["send_timestamp"]
+            latency_ms = (receive_time - send_time) * 1000.0
+            
+            self.latency_measurements.append({
+                "trial": len(self.latency_measurements) + 1,
+                "send_time": send_time,
+                "receive_time": receive_time,
+                "latency_ms": latency_ms
+            })
+            
+            print(f"Latency measurement {len(self.latency_measurements)}/{self.max_latency_measurements}: {latency_ms:.2f} ms")
+        
     @QtCore.pyqtSlot()
     def run(self):
         """Main subscriber loop - runs in a separate thread"""
@@ -349,6 +407,7 @@ class EEGPredictionSubscriber(QtCore.QObject):
                 # Process incoming messages
                 if self.subscriber in socks and socks[self.subscriber] == zmq.POLLIN:
                     message_json = self.subscriber.recv_json()
+                    receive_time = time.time()
                     
                     # Handle different message types
                     if "message_type" in message_json:
@@ -373,6 +432,7 @@ class EEGPredictionSubscriber(QtCore.QObject):
                             
                         elif message_json["message_type"] == "PREDICTION":
                             # Handle prediction updates
+                            self.process_latency_measurement(message_json, receive_time)
                             
                             # Add to history for smoothing if needed
                             self.prediction_history.append(message_json)
@@ -381,6 +441,25 @@ class EEGPredictionSubscriber(QtCore.QObject):
                                 
                             # Emit the raw prediction first
                             self.new_prediction_received.emit(message_json)
+
+                        elif message_json["message_type"] == "SESSION_DATA":
+                            # Handle end-of-session data dump if implementing that option
+                            logger.info("Received end-of-session data")
+                            
+                            # Store band data
+                            if "band_data" in message_json:
+                                self.session_band_data = message_json["band_data"]
+                                # Emit signal that session data is available
+                                self.new_band_data_available.emit(self.session_band_data)
+                                
+                            # Store timestamps
+                            if "timestamps" in message_json:
+                                self.session_eeg_timestamps = message_json["timestamps"]
+                        
+                        elif message_json["message_type"] == "SESSION_EEG_DATA":
+                            # Handle chunked EEG data
+                            if "eeg_data" in message_json:
+                                self.session_eeg_data.extend(message_json["eeg_data"])
                             
                     else:
                         # Backward compatibility with old message format
@@ -403,6 +482,60 @@ class EEGPredictionSubscriber(QtCore.QObject):
         logger.info("EEGPredictionSubscriber run loop finished.")
         self.connection_status.emit("Disconnected from EEG Backend.")
         self.finished.emit()
+
+    def save_session_data(self, session_id):
+        """Save all collected session data to the database"""
+        if not session_id:
+            logger.error("Cannot save session data: No session ID provided")
+            return False
+        
+        try:
+            # Check if we have data to save
+            if not self.session_band_data["alpha"]:
+                logger.warning("No band data available to save for session")
+                return False
+            
+            # Prepare data for the database
+            bands_dict = {
+                "session_id": session_id,
+                "alpha": self.session_band_data["alpha"],
+                "beta": self.session_band_data["beta"],
+                "theta": self.session_band_data["theta"],
+                "ab_ratio": self.session_band_data["ab_ratio"],
+                "bt_ratio": self.session_band_data["bt_ratio"],
+                "timestamps": self.session_eeg_timestamps
+            }
+            
+            # Save to database (this would need to be implemented in your db_manager)
+            saved = db_manager.save_session_band_data(bands_dict)
+            
+            # Optionally save EEG data (might be large)
+            if self.session_eeg_data and self.session_eeg_timestamps:
+                eeg_saved = db_manager.save_session_eeg_data(session_id, 
+                                                            self.session_eeg_data, 
+                                                            self.session_eeg_timestamps)
+                logger.info(f"EEG data saved: {eeg_saved}")
+            
+            # Clear stored data after saving
+            self.clear_session_data()
+            
+            return saved
+        
+        except Exception as e:
+            logger.error(f"Error saving session data: {e}")
+            return False
+
+    def clear_session_data(self):
+        """Reset all session data storage"""
+        self.session_band_data = {
+            "alpha": [],
+            "beta": [],
+            "theta": [],
+            "ab_ratio": [],
+            "bt_ratio": []
+        }
+        self.session_eeg_data = []
+        self.session_eeg_timestamps = []
         
     def stop(self):
         """Stop the subscriber"""

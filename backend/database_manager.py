@@ -408,6 +408,124 @@ def ensure_remember_token_column_exists():
         
     conn.close()
 
+def save_session_band_data(bands_dict):
+    """Save band power data for a session"""
+    session_id = bands_dict["session_id"]
+    
+    # Connect to database
+    conn = sqlite3.connect('your_database.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Create table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_band_data (
+            id INTEGER PRIMARY KEY,
+            session_id INTEGER,
+            timestamp REAL,
+            alpha REAL,
+            beta REAL,
+            theta REAL,
+            ab_ratio REAL,
+            bt_ratio REAL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+        ''')
+        
+        # Insert data in chunks for efficiency
+        entries = []
+        for i in range(len(bands_dict["timestamps"])):
+            # Make sure we don't go out of bounds
+            if i < len(bands_dict["alpha"]) and i < len(bands_dict["beta"]) and \
+               i < len(bands_dict["theta"]) and i < len(bands_dict["ab_ratio"]) and \
+               i < len(bands_dict["bt_ratio"]):
+                entries.append((
+                    session_id,
+                    bands_dict["timestamps"][i],
+                    bands_dict["alpha"][i],
+                    bands_dict["beta"][i],
+                    bands_dict["theta"][i],
+                    bands_dict["ab_ratio"][i],
+                    bands_dict["bt_ratio"][i]
+                ))
+        
+        # Insert in a single transaction for speed
+        cursor.executemany('''
+        INSERT INTO session_band_data 
+        (session_id, timestamp, alpha, beta, theta, ab_ratio, bt_ratio)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', entries)
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving band data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_eeg_data(session_id, eeg_data, timestamps):
+    """Save EEG data for a session"""
+    # This could be stored in a separate table or file due to size
+    # For simplicity, I'll show a minimal SQLite implementation
+    
+    conn = sqlite3.connect('your_database.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Create table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_eeg_data (
+            id INTEGER PRIMARY KEY,
+            session_id INTEGER,
+            timestamp REAL,
+            channel_0 REAL,
+            channel_1 REAL,
+            channel_2 REAL,
+            channel_3 REAL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+        ''')
+        
+        # Insert data in chunks
+        entries = []
+        for i in range(min(len(timestamps), len(eeg_data[0]))):
+            entries.append((
+                session_id,
+                timestamps[i],
+                eeg_data[0][i] if len(eeg_data) > 0 else 0,
+                eeg_data[1][i] if len(eeg_data) > 1 else 0,
+                eeg_data[2][i] if len(eeg_data) > 2 else 0,
+                eeg_data[3][i] if len(eeg_data) > 3 else 0
+            ))
+            
+            # Insert in batches to avoid memory issues with large datasets
+            if len(entries) >= 1000:
+                cursor.executemany('''
+                INSERT INTO session_eeg_data 
+                (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''', entries)
+                entries = []
+        
+        # Insert any remaining entries
+        if entries:
+            cursor.executemany('''
+            INSERT INTO session_eeg_data 
+            (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', entries)
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving EEG data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 # Call initialize_database() once when your app starts or when this module is first imported.
 if __name__ == "__main__":
     initialize_database()

@@ -122,6 +122,10 @@ class MeditationPageWidget(QtWidgets.QWidget):
         self.btn_start_unity_game.clicked.connect(self.launch_unity_game)
         game_teaser_layout.addWidget(self.btn_start_unity_game)
 
+        self.latency_test_button = QtWidgets.QPushButton("Run ZMQ Latency Test")
+        self.latency_test_button.clicked.connect(self.run_latency_test)
+        game_teaser_layout.addWidget(self.latency_test_button)  # Using game_teaser_layout instead of self.layout
+
         teasers_layout.addLayout(game_teaser_layout)
         self.main_layout.addLayout(teasers_layout)
         self.main_layout.addStretch(1)
@@ -231,7 +235,11 @@ class MeditationPageWidget(QtWidgets.QWidget):
             self.connection_timeout_timer.stop()
         if self.calibration_update_timer.isActive():
             self.calibration_update_timer.stop()
-
+        
+        if self.prediction_subscriber and self.current_session_id:
+            print(f"Meditation Page: Saving session band and EEG data for session {self.current_session_id}...")
+            self.prediction_subscriber.save_session_data(self.current_session_id)
+            
         if self.prediction_subscriber:
             print("Meditation Page: Requesting subscriber to stop...")
             self.prediction_subscriber.stop() # This should make the run() loop exit
@@ -866,3 +874,178 @@ class MeditationPageWidget(QtWidgets.QWidget):
         
         # Just to be safe, give the system a moment to fully release ports
         time.sleep(1)
+
+
+    def run_latency_test(self):
+        """Run a complete end-to-end latency test"""
+        if not self.prediction_subscriber:
+            QtWidgets.QMessageBox.warning(self, "Not Connected", 
+                                    "You need to connect to the EEG backend first.")
+            return
+        
+        # Ask for number of trials
+        num_trials, ok = QtWidgets.QInputDialog.getInt(
+            self, "ZMQ Latency Test", 
+            "Enter number of trials:", 5, 1, 50, 1)
+        
+        if not ok:
+            return
+            
+        # Prepare for end-to-end latency test
+        self.ui_latency_measurements = []
+        self.max_latency_trials = num_trials
+        
+        # Connect a temporary signal handler to track UI updates
+        self.prediction_subscriber.new_prediction_received.connect(self.measure_ui_latency)
+        
+        # Start the subscriber's latency test
+        self.prediction_subscriber.start_latency_test(num_trials)
+        
+        # Inform the user
+        QtWidgets.QMessageBox.information(self, "Latency Test Started", 
+            f"Complete latency test started with {num_trials} trials.\n\n"
+            f"Results will be saved to the 'test_results' folder.")
+
+    def measure_ui_latency(self, prediction_data):
+        """Measure the time it takes for a prediction to reach the UI"""
+        # Only process if we're in a latency test
+        if not hasattr(self, 'ui_latency_measurements'):
+            return
+                
+        # Get UI update timestamp
+        ui_time = time.time()
+        
+        # If this is a prediction with a send timestamp
+        if (prediction_data.get("message_type") == "PREDICTION" and 
+                "send_timestamp" in prediction_data):
+            
+            send_time = prediction_data["send_timestamp"]
+            total_latency_ms = (ui_time - send_time) * 1000.0
+            
+            self.ui_latency_measurements.append({
+                "trial": len(self.ui_latency_measurements) + 1,
+                "send_time": send_time,
+                "ui_time": ui_time,
+                "total_latency_ms": total_latency_ms
+            })
+            
+            print(f"UI Latency measurement {len(self.ui_latency_measurements)}/{self.max_latency_trials}: {total_latency_ms:.2f} ms")
+            
+            # Check if we've collected all measurements
+            if len(self.ui_latency_measurements) >= self.max_latency_trials:
+                # Disconnect the temporary signal handler
+                try:
+                    self.prediction_subscriber.new_prediction_received.disconnect(self.measure_ui_latency)
+                except:
+                    pass
+                    
+                # Generate UI latency report
+                self.generate_ui_latency_report()
+                
+    def generate_ui_latency_report(self):
+        """Generate a report of end-to-end latency including UI updates"""
+        if not hasattr(self, 'ui_latency_measurements') or not self.ui_latency_measurements:
+            print("No UI latency data available.")
+            return
+            
+        # Calculate statistics
+        latencies = [data['total_latency_ms'] for data in self.ui_latency_measurements]
+        avg_latency = sum(latencies) / len(latencies)
+        min_latency = min(latencies)
+        max_latency = max(latencies)
+        
+        # Create results directory if it doesn't exist
+        import os
+        import datetime
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        import matplotlib.backends.backend_agg as agg
+        
+        results_dir = "test_results"
+        if not os.path.exists(results_dir):
+            os.makedirs(results_dir)
+            
+        # Create figure
+        fig = plt.figure(figsize=(10, 8))
+        
+        # Table data
+        data = []
+        for i, measurement in enumerate(self.ui_latency_measurements):
+            data.append([
+                i+1, 
+                f"{measurement['send_time']:.6f}", 
+                f"{measurement['ui_time']:.6f}", 
+                f"{measurement['total_latency_ms']:.2f}"
+            ])
+        
+        # Add average row
+        data.append(["Average", "", "", f"{avg_latency:.2f}"])
+        
+        # Create table
+        ax1 = fig.add_subplot(211)
+        ax1.axis('off')
+        table = ax1.table(
+            cellText=data,
+            colLabels=["Trial", "Send Time", "UI Update Time", "Latency (ms)"],
+            loc='center',
+            cellLoc='center'
+        )
+        
+        # Style table
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.2, 1.5)
+        
+        # Highlight average row
+        for i, cell in table._cells.items():
+            if i[0] == len(data)-1:  # Last row (average)
+                cell.set_facecolor('#e0e0e0')
+                cell.set_text_props(weight='bold')
+        
+        # Add summary chart
+        ax2 = fig.add_subplot(212)
+        ax2.bar(range(1, len(latencies)+1), latencies, color='skyblue')
+        ax2.axhline(y=avg_latency, color='r', linestyle='-', label=f'Average: {avg_latency:.2f} ms')
+        ax2.set_xlabel('Trial')
+        ax2.set_ylabel('Latency (ms)')
+        ax2.set_title('End-to-End UI Latency')
+        ax2.legend()
+        ax2.grid(True, linestyle='--', alpha=0.7)
+        
+        # Set title
+        fig.suptitle('End-to-End Latency Test Results', fontsize=16)
+        fig.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust for main title
+        
+        # Save the figure
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"end_to_end_latency_test_{timestamp}.png"
+        filepath = os.path.join(results_dir, filename)
+        plt.savefig(filepath, dpi=100)
+        plt.close(fig)
+        
+        # Save CSV data
+        csv_path = os.path.join(results_dir, f"end_to_end_latency_{timestamp}.csv")
+        with open(csv_path, 'w') as f:
+            f.write("Trial,Send Time,UI Update Time,Total Latency (ms)\n")
+            for m in self.ui_latency_measurements:
+                f.write(f"{m['trial']},{m['send_time']:.6f},{m['ui_time']:.6f},{m['total_latency_ms']:.2f}\n")
+            f.write(f"Average,,,{avg_latency:.2f}\n")
+            f.write(f"Min,,,{min_latency:.2f}\n")
+            f.write(f"Max,,,{max_latency:.2f}\n")
+        
+        print(f"\nEnd-to-end latency report saved to:\n{filepath}\n{csv_path}")
+        
+        # Also show console output
+        print("\nEND-TO-END LATENCY TEST RESULTS")
+        print("------------------------------")
+        print("Trial | Send Time      | UI Update Time | Latency (ms)")
+        print("------------------------------------------------------")
+        
+        for data in self.ui_latency_measurements:
+            print(f"{data['trial']:5d} | {data['send_time']:.6f} | {data['ui_time']:.6f} | {data['total_latency_ms']:.2f}")
+            
+        print("------------------------------------------------------")
+        print(f"Average                                      | {avg_latency:.2f}")
+        print(f"Min                                          | {min_latency:.2f}")
+        print(f"Max                                          | {max_latency:.2f}")
+        print("------------------------------------------------------")
