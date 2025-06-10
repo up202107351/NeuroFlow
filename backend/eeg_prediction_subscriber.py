@@ -423,12 +423,23 @@ class EEGPredictionSubscriber(QtCore.QObject):
                             # Handle calibration progress updates
                             self.calibration_progress.emit(message_json["progress"])
                             
+                        elif message_json["message_type"] == "SIGNAL_QUALITY_UPDATE":
+                            # Handle real-time signal quality updates during calibration
+                            quality_data = message_json.get("quality_metrics", {})
+                            # You could emit a signal here if you want real-time updates
+                            
                         elif message_json["message_type"] == "CALIBRATION_STATUS":
-                            # Handle calibration status updates
-                            self.calibration_status.emit(
-                                message_json["status"], 
-                                message_json.get("baseline", {})
-                            )
+                            if message_json.get("status") == "PAUSED":
+                                # Handle calibration pause due to poor signal quality
+                                self.calibration_status.emit("PAUSED", message_json)
+                            elif message_json.get("status") == "WAITING_FOR_QUALITY":
+                                # Handle waiting for quality improvement
+                                self.calibration_status.emit("WAITING_FOR_QUALITY", message_json)
+                            else:
+                                self.calibration_status.emit(
+                                    message_json["status"], 
+                                    message_json.get("baseline", {})
+                                )
                             
                         elif message_json["message_type"] == "PREDICTION":
                             # Handle prediction updates

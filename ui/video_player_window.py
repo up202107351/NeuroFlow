@@ -3,6 +3,7 @@ import os
 import numpy as np
 import time
 import cv2  # OpenCV for video playback
+from ui.signal_quality_widget import SignalQualityWidget
 
 class RelaxationCircle(QtWidgets.QWidget):
     def __init__(self, parent=None):
@@ -113,6 +114,9 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         self.target_calibration_value = 0
         self.calibration_start_time = None
         
+        # Signal quality widget reference
+        self.signal_quality_widget = None
+        
         self.initUI()
         
         # Add a timer for smoother UI updates during calibration
@@ -132,16 +136,21 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
 
     def initUI(self):
         self.setWindowTitle("Neurofeedback Session")
-        self.setMinimumSize(1000, 600)
+        self.setMinimumSize(1200, 700)  # Increased size to accommodate signal quality widget
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for immersive feel
 
-        # Create main container with stacked widget for video
+        # Create main horizontal layout for video + signal quality panel
+        content_layout = QtWidgets.QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # Create main container for video
         self.main_container = QtWidgets.QWidget()
-        self.main_container_layout = QtWidgets.QHBoxLayout(self.main_container)
+        self.main_container_layout = QtWidgets.QVBoxLayout(self.main_container)
         self.main_container_layout.setContentsMargins(0, 0, 0, 0)
         
         # Add stacked widget for videos
@@ -180,11 +189,10 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         
         self.stacked_widget.addWidget(self.placeholder_widget)
 
-        # Add relaxation circle overlay in top-right corner
+        # Add relaxation circle overlay in top-right corner of video area
         self.circle_container = QtWidgets.QWidget(self.main_container)
         self.circle_container.setFixedSize(120, 120)
         self.circle_container.setStyleSheet("background-color: transparent;")
-        self.circle_container.move(20, 20)  # Position in top-left
         
         circle_layout = QtWidgets.QVBoxLayout(self.circle_container)
         circle_layout.setContentsMargins(10, 10, 10, 10)
@@ -193,10 +201,37 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         circle_layout.addWidget(self.relaxation_circle)
         circle_layout.setAlignment(QtCore.Qt.AlignCenter)
 
-        # Add main container to layout
-        main_layout.addWidget(self.main_container, 1)  # Takes most of the space
+        # Add main video container to content layout (takes most space)
+        content_layout.addWidget(self.main_container, 2)  # 2/3 of the space
 
-        # Status bar (used during calibration)
+        # Create signal quality panel (initially hidden, shown during calibration)
+        self.signal_quality_panel = QtWidgets.QWidget()
+        self.signal_quality_panel.setFixedWidth(350)  # Fixed width sidebar
+        self.signal_quality_panel.setStyleSheet("""
+            QWidget {
+                background-color: rgba(40, 40, 40, 240);
+                border-left: 2px solid #555;
+            }
+        """)
+        self.signal_quality_panel.hide()  # Initially hidden
+        
+        # Signal quality widget will be added here later
+        self.signal_quality_layout = QtWidgets.QVBoxLayout(self.signal_quality_panel)
+        self.signal_quality_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Add placeholder for signal quality widget
+        quality_placeholder = QtWidgets.QLabel("Signal Quality Monitor\nwill appear here during calibration")
+        quality_placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        quality_placeholder.setStyleSheet("color: #ccc; font-style: italic;")
+        self.signal_quality_layout.addWidget(quality_placeholder)
+        
+        # Add signal quality panel to content layout
+        content_layout.addWidget(self.signal_quality_panel, 1)  # 1/3 of the space
+
+        # Add content layout to main layout
+        main_layout.addLayout(content_layout, 1)  # Takes most of the space
+
+        # Status bar (used during calibration) - now spans full width
         self.status_bar = QtWidgets.QWidget()
         status_bar_layout = QtWidgets.QHBoxLayout(self.status_bar)
         status_bar_layout.setContentsMargins(10, 5, 10, 5)
@@ -259,15 +294,48 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         # Make sure videos directory exists
         os.makedirs(os.path.join(os.getcwd(), "assets", "videos"), exist_ok=True)
 
+    def add_signal_quality_widget(self, signal_quality_widget):
+        """Add the signal quality widget to the panel"""
+        if self.signal_quality_widget:
+            # Remove existing widget
+            self.signal_quality_layout.removeWidget(self.signal_quality_widget)
+            self.signal_quality_widget.setParent(None)
+        
+        # Clear the placeholder
+        for i in reversed(range(self.signal_quality_layout.count())):
+            child = self.signal_quality_layout.itemAt(i).widget()
+            if child:
+                child.setParent(None)
+        
+        # Add the new signal quality widget
+        self.signal_quality_widget = signal_quality_widget
+        self.signal_quality_layout.addWidget(self.signal_quality_widget)
+
+        signal_quality_widget.recalibrate_requested.connect(self.handle_recalibration_request)
+        
+        print("Signal quality widget added to video player window")
+
+    def show_signal_quality_panel(self):
+        """Show the signal quality panel during calibration"""
+        if self.signal_quality_widget:
+            self.signal_quality_panel.show()
+            print("Signal quality panel shown")
+
+    def hide_signal_quality_panel(self):
+        """Hide the signal quality panel after calibration"""
+        self.signal_quality_panel.hide()
+        print("Signal quality panel hidden")
+
     def resizeEvent(self, event):
         """Handle resize events to reposition overlay elements"""
         super().resizeEvent(event)
         
-        # Position relaxation circle in top-right corner with padding
-        if hasattr(self, 'circle_container'):
+        # Position relaxation circle in top-right corner of video area with padding
+        if hasattr(self, 'circle_container') and hasattr(self, 'main_container'):
             padding = 20
+            video_width = self.main_container.width()
             self.circle_container.move(
-                self.width() - self.circle_container.width() - padding, 
+                video_width - self.circle_container.width() - padding, 
                 padding
             )
     
@@ -279,6 +347,12 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         """Stop the UI update timer"""
         if self.ui_update_timer.isActive():
             self.ui_update_timer.stop()
+    
+    def handle_recalibration_request(self):
+        """Handle recalibration request from signal quality widget"""
+        # Emit a signal back to the meditation/focus page to restart calibration
+        self.recalibration_requested = QtCore.pyqtSignal()  # Add this signal to class
+        self.recalibration_requested.emit()
             
     def update_smooth_calibration(self):
         """Update calibration progress smoothly"""
@@ -320,6 +394,9 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         """Update calibration progress with smooth animation"""
         if not self.status_bar.isVisible():
             self.status_bar.show()
+            
+        # Show signal quality panel during calibration
+        self.show_signal_quality_panel()
             
         # Start calibration timer if not running
         if not self.calibration_timer.isActive():
@@ -376,6 +453,74 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         event.accept()
         super().closeEvent(event)
 
+    # ... [All your existing video-related methods remain the same] ...
+    # I'm keeping them for brevity, but they don't need changes
+
+    def start_relaxation_video(self):
+        """Start the relaxation video session"""
+        self.session_type = "RELAXATION"
+        
+        # Hide signal quality panel once calibration is complete
+        self.hide_signal_quality_panel()
+        
+        # Try to load video files
+        video_found = False
+        
+        # Try each video file until one works
+        for category, filename in self.video_files.items():
+            video_path = os.path.join(os.getcwd(), "assets", "videos", filename)
+            if os.path.exists(video_path):
+                print(f"Found video file: {video_path}")
+                self.load_video_file(filename)
+                video_found = True
+                break
+                
+        if not video_found:
+            print("No video files found. Using placeholder.")
+            self.switch_to_placeholder()
+            
+        # Initialize circle to 50%
+        self.relaxation_circle.setLevel(0.5)
+        
+        # Ensure visibility of elements
+        self.circle_container.raise_()  # Ensure circle is on top
+        self.status_bar.hide()  # Hide status after calibration
+        
+        # Initialize video effect parameters
+        self.blur_amount = 0.0
+        self.playback_rate = 1.0
+        self.brightness = 1.0
+        self.saturation = 1.0
+        
+        # Start video effects timer
+        self.video_effect_timer.start()
+        
+        QtWidgets.QApplication.processEvents()
+
+    def start_focus_video(self):
+        """Start the focus video session"""
+        self.session_type = "FOCUS"
+        
+        # Hide signal quality panel once calibration is complete
+        self.hide_signal_quality_panel()
+        
+        # For focus sessions, we can use the same video infrastructure
+        # but might want different visual effects or feedback
+        self.start_relaxation_video()  # Reuse the video system
+        
+        print("Focus video session started")
+
+    def hide_calibration_progress_bar(self):
+        """Hides the progress bar and status bar"""
+        if self.calibration_timer.isActive():
+            self.calibration_timer.stop()
+        self.status_bar.hide()
+        
+        # Also hide the signal quality panel when calibration is complete
+        self.hide_signal_quality_panel()
+
+    # ... [Rest of your existing methods remain exactly the same] ...
+    
     def set_scene(self, scene_name):
         """Set scene based on relaxation state"""
         if scene_name == self.current_scene and not self.using_placeholder:
@@ -392,11 +537,19 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
             "slightly_relaxed": "medium",
             "moderately_relaxed": "medium",
             "strongly_relaxed": "high",
-            "deeply_relaxed": "high"
+            "deeply_relaxed": "high",
+            # Focus states (for focus sessions)
+            "very_distracted": "low",
+            "distracted": "low", 
+            "less_focused": "low",
+            "slightly_focused": "medium",
+            "moderately_focused": "medium",
+            "strongly_focused": "high",
+            "deeply_focused": "high"
         }
         
-        # Special case - use thunder video at random 10% chance when tense
-        if scene_name in ["very_tense", "tense"] and np.random.random() < 0.1:
+        # Special case - use thunder video at random 10% chance when tense/distracted
+        if scene_name in ["very_tense", "tense", "very_distracted", "distracted"] and np.random.random() < 0.1:
             video_category = "thunder"
         else:
             video_category = video_mapping.get(scene_name, "medium")
@@ -699,53 +852,37 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
             self.update_placeholder_for_level(level)
 
     def set_focus_level(self, level):
-        """Support for focus visualization (if needed)"""
-        # For now, just map to relaxation visualization
-        self.set_relaxation_level(level)
-
-    def start_relaxation_video(self):
-        """Start the relaxation video session"""
-        self.session_type = "RELAXATION"
+        """Support for focus visualization"""
+        self.current_level = level
         
-        # Try to load video files
-        video_found = False
+        # Update circle visualization with animation
+        self.relaxation_circle.setLevel(level)
         
-        # Try each video file until one works
-        for category, filename in self.video_files.items():
-            video_path = os.path.join(os.getcwd(), "assets", "videos", filename)
-            if os.path.exists(video_path):
-                print(f"Found video file: {video_path}")
-                self.load_video_file(filename)
-                video_found = True
-                break
-                
-        if not video_found:
-            print("No video files found. Using placeholder.")
-            self.switch_to_placeholder()
+        # Scene selection based on focus level (different mapping than relaxation)
+        if level < 0.2:
+            scene = "very_distracted"
+        elif level < 0.3:
+            scene = "distracted"
+        elif level < 0.4:
+            scene = "less_focused"
+        elif level < 0.5:
+            scene = "neutral"
+        elif level < 0.6:
+            scene = "slightly_focused"
+        elif level < 0.75:
+            scene = "moderately_focused"
+        elif level < 0.9:
+            scene = "strongly_focused"
+        else:
+            scene = "deeply_focused"
             
-        # Initialize circle to 50%
-        self.relaxation_circle.setLevel(0.5)
-        
-        # Ensure visibility of elements
-        self.circle_container.raise_()  # Ensure circle is on top
-        self.status_bar.hide()  # Hide status after calibration
-        
-        # Initialize video effect parameters
-        self.blur_amount = 0.0
-        self.playback_rate = 1.0
-        self.brightness = 1.0
-        self.saturation = 1.0
-        
-        # Start video effects timer
-        self.video_effect_timer.start()
-        
-        QtWidgets.QApplication.processEvents()
-
-    def hide_calibration_progress_bar(self):
-        """Hides the progress bar and status bar"""
-        if self.calibration_timer.isActive():
-            self.calibration_timer.stop()
-        self.status_bar.hide()
+        # Update scene if needed
+        if scene != self.current_scene:
+            self.set_scene(scene)
+            
+        # If using placeholder, update it
+        if self.using_placeholder:
+            self.update_placeholder_for_level(level)
 
     def stop_session_button_clicked(self):
         """Handle stop button click"""

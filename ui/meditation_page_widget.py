@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt
 from datetime import datetime
 import time
 import random
+import numpy as np
 import matplotlib
 matplotlib.use('Qt5Agg') # Important: Use Qt5 backend for Matplotlib
 from ui.video_player_window import VideoPlayerWindow
@@ -16,6 +17,8 @@ from backend import database_manager as db_manager
 # import pythonosc # Not used directly if SimpleUDPClient is used
 from pythonosc.udp_client import SimpleUDPClient
 from backend.zmq_port_cleanup import cleanup_all_zmq_ports
+from ui.signal_quality_widget import SignalQualityWidget
+from backend.signal_quality_validator import SignalQualityValidator
 
 UNITY_IP = "127.0.0.1"
 UNITY_OSC_PORT = 9000
@@ -41,6 +44,8 @@ class MeditationPageWidget(QtWidgets.QWidget):
         self.last_sent_scene_index = -1
         self.UNITY_OSC_SCENE_ADDRESS = "/muse/scene"
         self.initUI()
+
+        self.signal_quality_validator = SignalQualityValidator()
 
         self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
 
@@ -175,10 +180,25 @@ class MeditationPageWidget(QtWidgets.QWidget):
         self.is_calibrating = True
         self.is_calibrated = False
         self.calibration_progress_value = 0 # Reset progress
-
-        if not self.video_player_window: # Create if it doesn't exist
-            self.video_player_window = VideoPlayerWindow(parent=self) # Parent it correctly for modality if needed
+        self.signal_quality_validator.reset()
+    
+        # Create video player window with signal quality widget
+        if not self.video_player_window:
+            self.video_player_window = VideoPlayerWindow(parent=self)
             self.video_player_window.session_stopped.connect(self.handle_video_session_stopped_signal)
+        
+        # Add signal quality widget to video player
+        if not hasattr(self.video_player_window, 'signal_quality_widget'):
+            self.video_player_window.signal_quality_widget = SignalQualityWidget()
+            self.video_player_window.signal_quality_widget.recalibrate_requested.connect(self.handle_recalibration_request)
+            
+            # Add to video player layout (you'll need to modify VideoPlayerWindow)
+            self.video_player_window.add_signal_quality_widget(self.video_player_window.signal_quality_widget)
+
+        if self.video_player_window:
+            # Connect recalibration signal
+            if hasattr(self.video_player_window, 'recalibration_requested'):
+                self.video_player_window.recalibration_requested.connect(self.handle_recalibration_request)
         
         self.video_player_window.set_status("Connecting to EEG...")
         self.video_player_window.show_calibration_progress(0) # Show bar immediately
@@ -454,6 +474,33 @@ class MeditationPageWidget(QtWidgets.QWidget):
         smooth_value = classification.get("smooth_value", 0.5)
         state_key = classification.get("state_key", "neutral")
 
+        if "signal_quality" in prediction_data:
+            quality_data = prediction_data["signal_quality"]
+            
+            # Update signal quality validator
+            if "accelerometer" in quality_data:
+                self.signal_quality_validator.add_accelerometer_data(
+                    np.array(quality_data["accelerometer"])
+                )
+            
+            if "band_powers" in quality_data:
+                self.signal_quality_validator.add_band_power_data(
+                    quality_data["band_powers"]
+                )
+            
+            # Get quality assessment
+            metrics = self.signal_quality_validator.assess_overall_quality()
+            
+            # Update signal quality widget
+            if (hasattr(self.video_player_window, 'signal_quality_widget') and 
+                self.video_player_window.signal_quality_widget):
+                self.video_player_window.signal_quality_widget.update_metrics(metrics)
+            
+            # Check if calibration should be paused
+            if self.is_calibrating and self.signal_quality_validator.should_pause_calibration():
+                if self.video_player_window:
+                    self.video_player_window.set_status("Poor signal quality - adjust headband")
+
         self.last_prediction = classification  # This line is crucial
     
         print(f"Got new prediction: state={state}, level={level}, smooth={smooth_value:.2f}")
@@ -562,7 +609,47 @@ class MeditationPageWidget(QtWidgets.QWidget):
 
         if self.calibration_update_timer.isActive():
             self.calibration_update_timer.stop()
+    
+    def handle_recalibration_request(self):
+        """Handle user request to recalibrate due to poor signal quality"""
+        reply = QtWidgets.QMessageBox.question(
+            self, 
+            "Recalibrate?", 
+            "This will restart the calibration process. Continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes
+        )
+        
+        if reply == QtWidgets.QMessageBox.Yes:
+            # Reset calibration state
+            self.is_calibrating = True
+            self.is_calibrated = False
+            self.calibration_progress_value = 0
+            
+            # Reset signal quality widget
+            if (self.video_player_window and 
+                hasattr(self.video_player_window, 'signal_quality_widget') and
+                self.video_player_window.signal_quality_widget):
+                self.video_player_window.signal_quality_widget.reset()
+            
+            # Reset UI
+            if self.video_player_window:
+                self.video_player_window.set_status("Restarting calibration...")
+                self.video_player_window.show_calibration_progress(0)
+                self.video_player_window.show_signal_quality_panel()
+            
+            # Request new calibration from backend
+            if self.prediction_subscriber:
+                # Send stop command first, then restart
+                self.prediction_subscriber.stop_session()
+                QtCore.QTimer.singleShot(1000, self._restart_calibration_after_stop)
 
+    def _restart_calibration_after_stop(self):
+        """Restart calibration after stopping current session"""
+        if self.prediction_subscriber and self.session_goal == "RELAXATION":
+            self.prediction_subscriber.start_relaxation_session()
+        elif self.prediction_subscriber and self.session_goal == "FOCUS":
+            self.prediction_subscriber.start_focus_session()
 
     @QtCore.pyqtSlot(str, dict)
     def on_calibration_status(self, status, baseline_data):
@@ -570,7 +657,19 @@ class MeditationPageWidget(QtWidgets.QWidget):
         
         if self.calibration_update_timer.isActive(): # Stop fake progress if real status comes
             self.calibration_update_timer.stop()
-
+            
+        if status == "PAUSED":
+            # Signal quality is poor - show user guidance
+            if self.video_player_window:
+                self.video_player_window.set_status("Poor signal quality - adjust headband")
+                # The signal quality widget will automatically show the recalibrate button
+                
+        elif status == "WAITING_FOR_QUALITY":
+            # Waiting for better signal quality
+            if self.video_player_window:
+                message = baseline_data.get('message', 'Waiting for better signal quality...')
+                self.video_player_window.set_status(message)
+            
         if status == "COMPLETED":
             self.is_calibrating = False
             self.is_calibrated = True

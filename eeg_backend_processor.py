@@ -19,6 +19,7 @@ import os
 import logging
 from datetime import datetime
 from scipy.signal import butter, filtfilt, welch
+from backend.signal_quality_validator import SignalQualityValidator
 
 # Set up logging
 logging.basicConfig(
@@ -787,10 +788,17 @@ class EEGProcessor:
         return result
 
     def perform_calibration(self, session_type):
-        """Perform calibration for current session type"""
+        """Perform calibration for current session type with signal quality monitoring"""
         self.is_calibrating = True
         self.is_calibrated = False
         self.current_session_type = session_type
+        
+        # Initialize signal quality validator for this calibration
+        if not hasattr(self, 'signal_quality_validator'):
+            from backend.signal_quality_validator import SignalQualityValidator
+            self.signal_quality_validator = SignalQualityValidator()
+        else:
+            self.signal_quality_validator.reset()
         
         # Send calibration start message
         self.zmq_publisher.publish_message({
@@ -808,8 +816,13 @@ class EEGProcessor:
         calibration_start_time = time.time()
         last_heartbeat_time = time.time()
         last_command_check = time.time()
+        last_quality_check = time.time()
         calibration_metrics_list = []
         enough_samples = False
+        
+        # Quality tracking variables
+        quality_pause_time = 0  # Time spent paused due to poor quality
+        max_quality_pause = 30.0  # Maximum time to wait for good quality (seconds)
         
         # Collect calibration data
         while time.time() - calibration_start_time < CALIBRATION_DURATION_SECONDS and self.running:
@@ -835,6 +848,18 @@ class EEGProcessor:
             chunk_np = np.array(chunk, dtype=np.float64).T
             eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
             
+            # Extract accelerometer data if available (adjust indices based on your Muse setup)
+            ACC_CHANNEL_INDICES = [9, 10, 11]  # Typical Muse accelerometer channels
+            if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
+                try:
+                    acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]
+                    if acc_chunk.shape[1] > 0:
+                        # Add accelerometer data to signal quality validator
+                        latest_acc_sample = acc_chunk[:, -1]  # Most recent sample
+                        self.signal_quality_validator.add_accelerometer_data(latest_acc_sample)
+                except Exception as e:
+                    logger.warning(f"Could not extract accelerometer data: {e}")
+            
             # Critically important: Add to buffer EVERY TIME we get data
             self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
             
@@ -853,17 +878,94 @@ class EEGProcessor:
                 metrics = self.calculate_band_powers(filtered_window)
                 
                 if metrics:
+                    # Add band power data to signal quality validator
+                    self.signal_quality_validator.add_band_power_data(metrics)
+                    self.signal_quality_validator.add_raw_eeg_data(eeg_window)
+                    
+                    # Check signal quality every second
+                    if current_time - last_quality_check >= 1.0:
+                        quality_metrics = self.signal_quality_validator.assess_overall_quality()
+                        
+                        # Check if signal quality is good enough to continue calibration
+                        if quality_metrics.overall_score < 0.4:  # Poor quality threshold
+                            # Pause calibration due to poor signal quality
+                            quality_pause_time += 1.0
+                            
+                            # Send quality warning message
+                            self.zmq_publisher.publish_message({
+                                "message_type": "CALIBRATION_STATUS",
+                                "status": "PAUSED",
+                                "reason": "Poor signal quality",
+                                "signal_quality": {
+                                    "overall_score": quality_metrics.overall_score,
+                                    "quality_level": quality_metrics.quality_level,
+                                    "recommendations": quality_metrics.recommendations
+                                },
+                                "timestamp": current_time
+                            })
+                            
+                            logger.warning(f"Calibration paused due to poor signal quality: {quality_metrics.quality_level}")
+                            
+                            # Check if we've waited too long for good quality
+                            if quality_pause_time > max_quality_pause:
+                                logger.error("Calibration failed: Signal quality timeout")
+                                self.is_calibrating = False
+                                
+                                self.zmq_publisher.publish_message({
+                                    "message_type": "CALIBRATION_STATUS",
+                                    "status": "FAILED",
+                                    "error_message": "Signal quality timeout - please adjust headband and try again",
+                                    "timestamp": time.time()
+                                })
+                                
+                                return False
+                            
+                            last_quality_check = current_time
+                            continue  # Skip adding this sample to calibration data
+                        
+                        else:
+                            # Good quality - reset pause time
+                            quality_pause_time = 0
+                            
+                            # Send quality status update
+                            self.zmq_publisher.publish_message({
+                                "message_type": "SIGNAL_QUALITY_UPDATE",
+                                "quality_metrics": {
+                                    "movement_score": quality_metrics.movement_score,
+                                    "band_power_score": quality_metrics.band_power_score,
+                                    "electrode_contact_score": quality_metrics.electrode_contact_score,
+                                    "overall_score": quality_metrics.overall_score,
+                                    "quality_level": quality_metrics.quality_level,
+                                    "recommendations": quality_metrics.recommendations
+                                },
+                                "timestamp": current_time
+                            })
+                        
+                        last_quality_check = current_time
+                    
+                    # Add to calibration data only if quality is acceptable
                     calibration_metrics_list.append(metrics)
                     
-                    # Publish progress update
+                    # Publish progress update with signal quality info
                     progress = min(1.0, (time.time() - calibration_start_time) / CALIBRATION_DURATION_SECONDS)
-                    self.zmq_publisher.publish_message({
+                    
+                    progress_message = {
                         "message_type": "CALIBRATION_PROGRESS",
                         "progress": round(progress, 2),
                         "current_alpha": metrics['alpha'],
                         "current_beta": metrics['beta'],
                         "timestamp": time.time()
-                    })
+                    }
+                    
+                    # Include signal quality in progress message
+                    if hasattr(self, 'signal_quality_validator'):
+                        latest_quality = self.signal_quality_validator.assess_overall_quality()
+                        progress_message["signal_quality"] = {
+                            "overall_score": latest_quality.overall_score,
+                            "quality_level": latest_quality.quality_level
+                        }
+                    
+                    self.zmq_publisher.publish_message(progress_message)
                     
             # Prevent excessive buffer growth
             max_buffer_size = int(self.sampling_rate * 10)  # Keep 10 seconds max
@@ -894,16 +996,29 @@ class EEGProcessor:
             # Record session start time
             self.session_start_time = time.time()
             
-            # Send calibration complete message
-            self.zmq_publisher.publish_message({
+            # Get final signal quality assessment
+            final_quality = self.signal_quality_validator.assess_overall_quality()
+            
+            # Send calibration complete message with quality info
+            completion_message = {
                 "message_type": "CALIBRATION_STATUS",
                 "status": "COMPLETED",
                 "session_type": session_type,
                 "baseline": self.baseline_metrics,
+                "signal_quality": {
+                    "overall_score": final_quality.overall_score,
+                    "quality_level": final_quality.quality_level,
+                    "recommendations": final_quality.recommendations
+                },
+                "samples_collected": len(calibration_metrics_list),
                 "timestamp": time.time()
-            })
+            }
             
-            logger.info(f"Calibration complete: Alpha={self.baseline_metrics['alpha']:.2f}, Beta={self.baseline_metrics['beta']:.2f}")
+            self.zmq_publisher.publish_message(completion_message)
+            
+            logger.info(f"Calibration complete: Alpha={self.baseline_metrics['alpha']:.2f}, "
+                    f"Beta={self.baseline_metrics['beta']:.2f}, "
+                    f"Quality={final_quality.quality_level}")
             return True
         else:
             logger.error("Calibration failed: No metrics collected")
@@ -918,6 +1033,7 @@ class EEGProcessor:
             })
             
             return False
+
             
     def process_commands(self):
         """Check for and process incoming commands (non-blocking)"""
@@ -945,11 +1061,16 @@ class EEGProcessor:
             logger.error(f"Error processing commands: {e}")
         
     def run_prediction_loop(self):
-        """Main processing loop for EEG prediction with adaptive publishing"""
+        """Main processing loop for EEG prediction with adaptive publishing and signal quality validation"""
         last_prediction_time = 0
         last_published_time = 0
         last_published_value = None
         prediction_interval = ANALYSIS_WINDOW_SECONDS  # How often we analyze data
+        
+        # Add signal quality validator (IMPROVED: check if it exists first)
+        if not hasattr(self, 'signal_quality_validator'):
+            from backend.signal_quality_validator import SignalQualityValidator
+            self.signal_quality_validator = SignalQualityValidator()
         
         while self.running:
             try:
@@ -962,14 +1083,29 @@ class EEGProcessor:
                     time.sleep(0.1)
                     continue
                     
-                # Get and process data (unchanged)
+                # Get and process data - NOW INCLUDING ACCELEROMETER
                 chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
                 if not chunk:
                     continue
                     
-                # Add to buffer (unchanged)
+                # Add to buffer (modified to handle accelerometer data)
                 chunk_np = np.array(chunk, dtype=np.float64).T
-                eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
+                eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]  # EEG channels (usually 0-3)
+                
+                # Extract accelerometer data (IMPROVED: add error handling)
+                ACC_CHANNEL_INDICES = [9, 10, 11]  # X, Y, Z accelerometer channels
+                try:
+                    if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
+                        acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]  # Accelerometer channels
+                        
+                        # Add accelerometer data to signal quality validator
+                        if acc_chunk.shape[1] > 0:
+                            # Take the most recent accelerometer sample
+                            latest_acc_sample = acc_chunk[:, -1]  # Last sample (x, y, z)
+                            self.signal_quality_validator.add_accelerometer_data(latest_acc_sample)
+                except Exception as e:
+                    logger.warning(f"Could not extract accelerometer data: {e}")
+                
                 self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
                 
                 # Prune buffer (unchanged)
@@ -988,6 +1124,15 @@ class EEGProcessor:
                     current_metrics = self.calculate_band_powers(filtered_window)
                     
                     if current_metrics:
+                        # Add band power data to signal quality validator
+                        self.signal_quality_validator.add_band_power_data(current_metrics)
+                        
+                        # Add raw EEG data to signal quality validator
+                        self.signal_quality_validator.add_raw_eeg_data(window_for_analysis)
+                        
+                        # Get signal quality assessment
+                        signal_quality_metrics = self.signal_quality_validator.assess_overall_quality()
+                        
                         # Update history (unchanged)
                         self.recent_metrics_history.append(current_metrics)
                         if len(self.recent_metrics_history) > MAX_HISTORY_SIZE:
@@ -1001,6 +1146,26 @@ class EEGProcessor:
                             
                         # Classify mental state
                         classification = self.classify_mental_state(current_metrics)
+                        
+                        # Check if calibration should be paused due to poor signal quality
+                        if self.is_calibrating and self.signal_quality_validator.should_pause_calibration():
+                            # Send calibration pause message
+                            pause_message = {
+                                "message_type": "CALIBRATION_STATUS",
+                                "status": "PAUSED",
+                                "reason": "Poor signal quality",
+                                "signal_quality": {
+                                    "overall_score": signal_quality_metrics.overall_score,
+                                    "quality_level": signal_quality_metrics.quality_level,
+                                    "recommendations": signal_quality_metrics.recommendations
+                                },
+                                "baseline": {}
+                            }
+                            self.zmq_publisher.publish_message(pause_message)
+                            
+                            # Don't proceed with classification during poor quality periods
+                            last_prediction_time = current_time
+                            continue
                         
                         # NEW: Determine if we should publish this prediction
                         should_publish = False
@@ -1057,7 +1222,23 @@ class EEGProcessor:
                                     "bt_ratio": [round(current_metrics['bt_ratio'], 3)]
                                 }
                                 
-                                # Construct prediction message with new samples
+                                # NEW: Prepare signal quality data for frontend
+                                signal_quality_data = {
+                                    "accelerometer": self.signal_quality_validator.accelerometer_history[-1]['data'].tolist() 
+                                                    if self.signal_quality_validator.accelerometer_history else [0, 0, 0],
+                                    "band_powers": current_metrics,
+                                    "quality_metrics": {
+                                        "movement_score": signal_quality_metrics.movement_score,
+                                        "band_power_score": signal_quality_metrics.band_power_score,
+                                        "electrode_contact_score": signal_quality_metrics.electrode_contact_score,
+                                        "overall_score": signal_quality_metrics.overall_score,
+                                        "quality_level": signal_quality_metrics.quality_level,
+                                        "recommendations": signal_quality_metrics.recommendations
+                                    },
+                                    "timestamp": current_time
+                                }
+                                
+                                # Construct prediction message with new samples AND signal quality
                                 prediction_data = {
                                     "message_type": "PREDICTION",
                                     "timestamp": current_time,
@@ -1073,6 +1254,7 @@ class EEGProcessor:
                                         "bt_ratio": round(current_metrics['bt_ratio'], 3)
                                     },
                                     "band_data": band_data,
+                                    "signal_quality": signal_quality_data,  # NEW: Include signal quality data
                                     "new_samples": {
                                         "eeg_data": new_eeg_data,
                                         "timestamps": sample_timestamps,
@@ -1082,7 +1264,22 @@ class EEGProcessor:
                                     }
                                 }
                             else:
-                                # No new data to send
+                                # No new data to send, but still include signal quality
+                                signal_quality_data = {
+                                    "accelerometer": self.signal_quality_validator.accelerometer_history[-1]['data'].tolist() 
+                                                    if self.signal_quality_validator.accelerometer_history else [0, 0, 0],
+                                    "band_powers": current_metrics,
+                                    "quality_metrics": {
+                                        "movement_score": signal_quality_metrics.movement_score,
+                                        "band_power_score": signal_quality_metrics.band_power_score,
+                                        "electrode_contact_score": signal_quality_metrics.electrode_contact_score,
+                                        "overall_score": signal_quality_metrics.overall_score,
+                                        "quality_level": signal_quality_metrics.quality_level,
+                                        "recommendations": signal_quality_metrics.recommendations
+                                    },
+                                    "timestamp": current_time
+                                }
+                                
                                 prediction_data = {
                                     "message_type": "PREDICTION",
                                     "timestamp": current_time,
@@ -1096,7 +1293,8 @@ class EEGProcessor:
                                         "theta": round(current_metrics['theta'], 3),
                                         "ab_ratio": round(current_metrics['ab_ratio'], 3),
                                         "bt_ratio": round(current_metrics['bt_ratio'], 3)
-                                    }
+                                    },
+                                    "signal_quality": signal_quality_data  # NEW: Include signal quality data
                                 }
                             
                             self.zmq_publisher.publish_message(prediction_data)
