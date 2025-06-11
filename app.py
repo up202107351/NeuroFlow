@@ -9,6 +9,7 @@ from ui.home_page_widget import HomePageWidget
 from ui.meditation_page_widget import MeditationPageWidget
 from ui.focus_page_widget import FocusPageWidget
 from ui.history_page_widget import HistoryPageWidget
+from ui.unified_page_widget import UnifiedEEGPageWidget
 from ui.login_widget import LoginWidget
 from backend.lsl_status_checker import LSLStatusChecker
 
@@ -130,8 +131,8 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         self.stacked_widget = QtWidgets.QStackedWidget()
         # ... (rest of stacked widget and page setup as before) ...
         self.home_page = HomePageWidget()
-        self.meditation_page = MeditationPageWidget(self, main_app_window_ref=self)
-        self.focus_page = FocusPageWidget(self, main_app_window_ref=self)
+        self.meditation_page = UnifiedEEGPageWidget(self, main_app_window_ref=self, page_type="meditation")
+        self.focus_page = UnifiedEEGPageWidget(self, main_app_window_ref=self, page_type="focus")
         self.history_page = HistoryPageWidget(self, main_app_window_ref=self) # Placeholder for now
 
         self.page_map = {
