@@ -1,0 +1,26 @@
+Enhanced EEG File Channel Information
+Generated on: 2025-06-10 23:21:02
+Original file: live_session_data/eeg_data_raw.npy
+Enhanced file: live_session_data/eeg_data_raw.npy
+
+Data shape: (12, 37376)
+Sampling rate: 256 Hz (assumed)
+Duration: 146.0 seconds
+
+Channel Layout:
+  Row  0: EEG_0 (TP9)
+  Row  1: EEG_1 (AF7)
+  Row  2: EEG_2 (AF8)
+  Row  3: EEG_3 (TP10)
+  Row  4: AUX_4
+  Row  5: AUX_5
+  Row  6: AUX_6
+  Row  7: AUX_7
+  Row  8: AUX_8
+  Row  9: ACC_X
+  Row 10: ACC_Y
+  Row 11: ACC_Z
+
+For your app configuration:
+EEG_CHANNEL_INDICES = [0, 1, 2, 3]  # Rows 0-3
+ACC_CHANNEL_INDICES = [9, 10, 11]   # Rows 9-11

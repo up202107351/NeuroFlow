@@ -76,6 +76,7 @@ class RelaxationCircle(QtWidgets.QWidget):
 
 class VideoPlayerWindow(QtWidgets.QMainWindow):
     session_stopped = QtCore.pyqtSignal()
+    recalibration_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -351,7 +352,6 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
     def handle_recalibration_request(self):
         """Handle recalibration request from signal quality widget"""
         # Emit a signal back to the meditation/focus page to restart calibration
-        self.recalibration_requested = QtCore.pyqtSignal()  # Add this signal to class
         self.recalibration_requested.emit()
             
     def update_smooth_calibration(self):
