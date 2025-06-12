@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Enhanced EEG Testing Script
+Enhanced EEG Testing Script v2 - Final Threading Fix
 
 Features:
+- Matplotlib in main thread with timer-based updates
+- Persistent user state labeling with visual feedback
+- Advanced classification validation with accuracy metrics
 - Signal quality validation using accelerometer data
-- Advanced classification logic from eeg_processing_worker
-- Real-time user state labeling via keyboard
-- Latency measurement and visualization
-- Comprehensive data logging for validation
+- Real-time visualization with color-coded user states
+- Comprehensive analysis and reporting
 """
 
 import time
@@ -15,7 +16,7 @@ import numpy as np
 import pylsl
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Rectangle
 from datetime import datetime
 import signal
 import os
@@ -25,6 +26,7 @@ from scipy.signal import butter, filtfilt, welch
 import threading
 import logging
 from collections import deque
+import queue
 
 # Import from backend modules
 from backend.signal_quality_validator import SignalQualityValidator, SignalQualityMetrics
@@ -54,8 +56,8 @@ ACC_CHANNEL_INDICES = [9, 10, 11]   # X, Y, Z for accelerometer
 NUM_EEG_CHANNELS = len(EEG_CHANNEL_INDICES)
 
 CALIBRATION_DURATION_SECONDS = 20.0
-ANALYSIS_WINDOW_SECONDS = 1.0  # How often to give feedback (shorter for better responsiveness)
-PSD_WINDOW_SECONDS = 6.0       # Data length for each individual PSD calculation
+ANALYSIS_WINDOW_SECONDS = 1.0
+PSD_WINDOW_SECONDS = 6.0
 
 DEFAULT_SAMPLING_RATE = 256.0
 
@@ -76,13 +78,13 @@ welch_overlap_samples = nfft // 2
 filter_order = 4
 lowcut = 0.5
 highcut = 30.0
-nyq = 0.5 * sampling_rate
-low = lowcut / nyq
 
 # Signal quality related
 signal_quality_validator = None
 
-# Butterworth filter design
+# Filter coefficients
+nyq = 0.5 * sampling_rate
+low = lowcut / nyq
 b_hp, a_hp = butter(filter_order, low, btype='highpass', analog=False)
 high = highcut / nyq
 b_lp, a_lp = butter(filter_order, high, btype='lowpass', analog=False)
@@ -93,10 +95,12 @@ full_session_eeg_data = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
 full_session_eeg_data_raw = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
 full_session_timestamps_lsl = []
 
-# Feedback and user annotation
-feedback_log = [] 
-user_labels = []  # List of {"time": timestamp, "label": label_text} dicts
-quality_log = []  # List of {"time": timestamp, "metrics": quality_metrics} dicts
+# Enhanced labeling system
+feedback_log = []
+user_labels = []  # Event markers (artifacts, eyes open/closed)
+user_state_changes = []  # Persistent state changes
+current_user_state = "Unknown"  # Current persistent state
+quality_log = []
 
 # State tracking
 previous_states = []
@@ -107,40 +111,31 @@ level_velocity = 0.0
 
 # Current session type
 session_type = None
+session_start_time = None
+
+# Threading control
+data_processing_thread = None
+calibration_complete = False
 
 # --- Data Saving Configuration ---
 SAVE_PATH = "test_session_data/"
 timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 os.makedirs(SAVE_PATH, exist_ok=True)
 
-# --- Visualization ---
-plt.ion()  # Enable interactive mode
-fig, axs = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-fig.canvas.manager.set_window_title('EEG Testing Interface')
-
-# --- Thresholds from eeg_processing_worker.py ---
-THRESHOLDS = {
-    'alpha_incr': [1.10, 1.25, 1.50],
-    'alpha_decr': [0.90, 0.80, 0.65],
-    'beta_incr': [1.10, 1.20, 1.40],
-    'beta_decr': [0.90, 0.80],
-    'theta_incr': [1.15, 1.30],
-    'theta_decr': [0.85, 0.70],
-    'ab_ratio_incr': [1.10, 1.20, 1.40],
-    'ab_ratio_decr': [0.90, 0.75],
-    'bt_ratio_incr': [1.15, 1.30, 1.60],
-    'bt_ratio_decr': [0.85, 0.70]
-}
-
-# --- User Labeling Setup ---
-USER_LABELS = {
+# --- Enhanced User Labels ---
+STATE_LABELS = {
     '1': 'Very Relaxed',
-    '2': 'Relaxed',
+    '2': 'Relaxed', 
     '3': 'Neutral',
     '4': 'Focused',
     '5': 'Very Focused',
+    '0': 'Unknown',
+    'u': 'Uncertain'
+}
+
+EVENT_LABELS = {
     's': 'START_ACTIVITY',
-    'e': 'END_ACTIVITY',
+    'e': 'END_ACTIVITY', 
     'b': 'BLINK_ARTIFACT',
     'm': 'MOVEMENT_ARTIFACT',
     'n': 'NOISE_ARTIFACT',
@@ -148,11 +143,26 @@ USER_LABELS = {
     'o': 'EYES_OPEN'
 }
 
-print("\n=== EEG Testing Script with Signal Quality Validation ===")
-print("\nUser Labels (press key to mark):")
-for key, label in USER_LABELS.items():
+# Color mapping for states
+STATE_COLORS = {
+    'Very Relaxed': '#0066CC',
+    'Relaxed': '#3399FF', 
+    'Neutral': '#CCCCCC',
+    'Focused': '#FF6600',
+    'Very Focused': '#CC3300',
+    'Unknown': '#FFFFFF',
+    'Uncertain': '#FFFF99'
+}
+
+print("\n=== Enhanced EEG Testing Script v2 ===")
+print("\nPersistent State Labels (press key to set current state):")
+for key, label in STATE_LABELS.items():
     print(f"  [{key}] - {label}")
-print("\nPress Ctrl+C to end the session")
+print("\nEvent Markers (single events):")
+for key, label in EVENT_LABELS.items():
+    print(f"  [{key}] - {label}")
+print(f"\nCurrent State: {current_user_state}")
+print("Press Ctrl+C to end the session")
 
 
 def graceful_signal_handler(sig, frame):
@@ -187,11 +197,7 @@ def connect_to_lsl():
         # Create signal quality validator
         signal_quality_validator = SignalQualityValidator()
         
-        print(f"Connected to '{info.name()}' @ {sampling_rate:.2f} Hz. NFFT={nfft}, Overlap={welch_overlap_samples}")
-        
-        # Debug: Print channel info
-        print(f"Channel count: {info.channel_count()}")
-        print(f"EEG channels: {EEG_CHANNEL_INDICES}")
+        print(f"Connected to '{info.name()}' @ {sampling_rate:.2f} Hz")
         
         if info.channel_count() < np.max(EEG_CHANNEL_INDICES) + 1:
             print(f"ERROR: LSL stream has insufficient channels.")
@@ -203,6 +209,43 @@ def connect_to_lsl():
         return False
 
 
+def update_user_state(new_state):
+    """Update the current user state and log the change"""
+    global current_user_state, user_state_changes
+    
+    if new_state != current_user_state:
+        timestamp = time.time()
+        user_state_changes.append({
+            "time": timestamp,
+            "from_state": current_user_state,
+            "to_state": new_state
+        })
+        current_user_state = new_state
+        
+        # Update session time if this is the first state change after calibration
+        if session_start_time:
+            time_rel = timestamp - session_start_time
+            print(f"\n>>> State Change @ {time_rel:.1f}s: {new_state}")
+        else:
+            print(f"\n>>> State Change: {new_state}")
+
+
+def get_current_user_state_at_time(timestamp):
+    """Get what the user's reported state was at a given timestamp"""
+    if not user_state_changes:
+        return "Unknown"
+    
+    # Find the most recent state change before this timestamp
+    current_state = "Unknown"
+    for change in user_state_changes:
+        if change["time"] <= timestamp:
+            current_state = change["to_state"]
+        else:
+            break
+    
+    return current_state
+
+
 def filter_eeg_data(eeg_data):
     """Apply bandpass filter to EEG data"""
     min_samples = 3 * filter_order + 1
@@ -212,9 +255,7 @@ def filter_eeg_data(eeg_data):
         
     eeg_filtered = np.zeros_like(eeg_data)
     for i in range(NUM_EEG_CHANNELS):
-        # Apply low-pass filter first
         eeg_filtered[i] = filtfilt(b_lp, a_lp, eeg_data[i])
-        # Then apply high-pass filter
         eeg_filtered[i] = filtfilt(b_hp, a_hp, eeg_filtered[i])
     
     return eeg_filtered
@@ -225,7 +266,7 @@ def calculate_band_powers(eeg_segment):
     if eeg_segment.shape[1] < nfft:
         return None
     
-    # Apply artifact rejection from eeg_processing_worker
+    # Apply artifact rejection
     artifact_mask = improved_artifact_rejection(eeg_segment)
     if np.sum(artifact_mask) < 0.7 * eeg_segment.shape[1]:
         return None
@@ -242,10 +283,7 @@ def calculate_band_powers(eeg_segment):
         
         try:
             psd = DataFilter.get_psd_welch(
-                ch_data, 
-                nfft, 
-                welch_overlap_samples, 
-                int(sampling_rate), 
+                ch_data, nfft, welch_overlap_samples, int(sampling_rate), 
                 WindowOperations.HANNING.value
             )
             
@@ -255,13 +293,12 @@ def calculate_band_powers(eeg_segment):
                 'beta': DataFilter.get_band_power(psd, BETA_BAND[0], BETA_BAND[1])
             })
         except Exception as e:
-            print(f"PSD calculation error: {e}")
             return None
     
     if len(metrics_list) != NUM_EEG_CHANNELS:
         return None
         
-    # Calculate weighted average (assuming equal weights)
+    # Calculate weighted average
     avg_metrics = {
         'theta': np.mean([m['theta'] for m in metrics_list]),
         'alpha': np.mean([m['alpha'] for m in metrics_list]),
@@ -275,7 +312,7 @@ def calculate_band_powers(eeg_segment):
 
 
 def improved_artifact_rejection(eeg_data):
-    """Advanced artifact rejection from eeg_processing_worker.py"""
+    """Advanced artifact rejection"""
     channel_thresholds = [150, 100, 100, 150]
     amplitude_mask = ~np.any(np.abs(eeg_data) > np.array(channel_thresholds).reshape(-1, 1), axis=0)
     
@@ -284,23 +321,16 @@ def improved_artifact_rejection(eeg_data):
         diff_thresholds = [50, 30, 30, 50]
         diff_mask = ~np.any(
             np.abs(np.diff(eeg_data, axis=1, prepend=eeg_data[:, :1])) > 
-            np.array(diff_thresholds).reshape(-1, 1), 
-            axis=0
+            np.array(diff_thresholds).reshape(-1, 1), axis=0
         )
     
     return amplitude_mask & diff_mask
 
 
 def calculate_state_probabilities(current_metrics):
-    """Calculate probabilities for different mental states (from eeg_processing_worker)"""
+    """Calculate probabilities for different mental states"""
     if not baseline_metrics:
-        return {
-            'relaxed': 0.5,
-            'focused': 0.5,
-            'drowsy': 0.2,
-            'internal_focus': 0.3,
-            'neutral': 0.7
-        }
+        return {'relaxed': 0.5, 'focused': 0.5, 'drowsy': 0.2, 'internal_focus': 0.3, 'neutral': 0.7}
     
     def sigmoid(x, k=5):
         return 1 / (1 + np.exp(-k * x))
@@ -330,26 +360,19 @@ def calculate_state_probabilities(current_metrics):
     neutral_prob = sigmoid(baseline_closeness, k=5)
     
     return {
-        'relaxed': relaxed_prob,
-        'focused': focused_prob,
-        'drowsy': drowsy_prob,
-        'internal_focus': internal_focus_prob,
-        'neutral': neutral_prob
+        'relaxed': relaxed_prob, 'focused': focused_prob, 'drowsy': drowsy_prob,
+        'internal_focus': internal_focus_prob, 'neutral': neutral_prob
     }
 
 
 def classify_mental_state(current_metrics):
-    """Classify mental state based on current metrics (from eeg_processing_worker)"""
-    global previous_states, state_velocity, level_velocity, session_type
+    """Classify mental state based on current metrics"""
+    global previous_states, state_velocity, session_type
     
     if not baseline_metrics or not current_metrics:
         return {
-            "state": "Calibrating",
-            "level": 0,
-            "confidence": "N/A",
-            "value": 0.5,
-            "smooth_value": 0.5,
-            "state_key": "calibrating"
+            "state": "Calibrating", "level": 0, "confidence": "N/A",
+            "value": 0.5, "smooth_value": 0.5, "state_key": "calibrating"
         }
     
     # Get state probabilities
@@ -374,39 +397,30 @@ def classify_mental_state(current_metrics):
         # Determine relaxation levels
         if (ab_ratio_decrease > 0.1 and (beta_increase > 0.1 or alpha_decrease > 0.1)):
             if alert_signal > 1.5:
-                level = -3
-                state_name = "tense"
+                level = -3; state_name = "tense"
             elif alert_signal > 1.0:
-                level = -2
-                state_name = "alert"
+                level = -2; state_name = "alert"
             else:
-                level = -1
-                state_name = "less_relaxed"
+                level = -1; state_name = "less_relaxed"
         elif relaxation_value > 0.3:
             alpha_increase = current_metrics['alpha'] / baseline_metrics['alpha'] - 1.0
             ab_ratio_increase = current_metrics['ab_ratio'] / baseline_metrics['ab_ratio'] - 1.0 if baseline_metrics['ab_ratio'] > 0 else 0
             relax_signal = (0.5 * alpha_increase + 0.5 * ab_ratio_increase) * 5.0
             
             if relax_signal > 0.5:
-                level = 4
-                state_name = "deeply_relaxed"
+                level = 4; state_name = "deeply_relaxed"
             elif relax_signal > 0.25:
-                level = 3
-                state_name = "strongly_relaxed"
+                level = 3; state_name = "strongly_relaxed"
             elif relax_signal > 0.1:
-                level = 2
-                state_name = "moderately_relaxed"
+                level = 2; state_name = "moderately_relaxed"
             else:
-                level = 1
-                state_name = "slightly_relaxed"
+                level = 1; state_name = "slightly_relaxed"
         else:
-            level = 0
-            state_name = "neutral"
+            level = 0; state_name = "neutral"
         
         value = (level + 3) / 7.0
         
     elif session_type == SESSION_TYPE_FOCUS:
-        # Focus classification logic
         focus_value = min(1.0, max(0.0, state_probs['focused']))
         
         # Calculate focus and distraction signals
@@ -419,34 +433,26 @@ def classify_mental_state(current_metrics):
         # Determine focus levels
         if (bt_ratio_decrease > 0.1 and (beta_decrease > 0.1 or theta_increase > 0.1)):
             if distraction_signal > 1.5:
-                level = -3
-                state_name = "distracted"
+                level = -3; state_name = "distracted"
             elif distraction_signal > 1.0:
-                level = -2
-                state_name = "less_attentive"
+                level = -2; state_name = "less_attentive"
             else:
-                level = -1
-                state_name = "less_focused"
+                level = -1; state_name = "less_focused"
         elif focus_value > 0.3:
             beta_increase = current_metrics['beta'] / baseline_metrics['beta'] - 1.0
             bt_ratio_increase = current_metrics['bt_ratio'] / baseline_metrics['bt_ratio'] - 1.0 if baseline_metrics['bt_ratio'] > 0 else 0
             focus_signal = (0.5 * beta_increase + 0.5 * bt_ratio_increase) * 5.0
             
             if focus_signal > 0.5:
-                level = 4
-                state_name = "highly_focused"
+                level = 4; state_name = "highly_focused"
             elif focus_signal > 0.25:
-                level = 3
-                state_name = "strongly_focused"
+                level = 3; state_name = "strongly_focused"
             elif focus_signal > 0.1:
-                level = 2
-                state_name = "moderately_focused"
+                level = 2; state_name = "moderately_focused"
             else:
-                level = 1
-                state_name = "slightly_focused"
+                level = 1; state_name = "slightly_focused"
         else:
-            level = 0
-            state_name = "neutral"
+            level = 0; state_name = "neutral"
         
         value = (level + 3) / 7.0
     else:
@@ -466,69 +472,143 @@ def classify_mental_state(current_metrics):
     smooth_value = value
     
     previous_states.append((state_name, value, level))
-    if len(previous_states) > 5:  # MAX_STATE_HISTORY
+    if len(previous_states) > 5:
         previous_states.pop(0)
     
     if len(previous_states) > 1:
-        current_value = value
         recent_values = [s[1] for s in previous_states]
         prev_value = recent_values[-2]
         
-        target_velocity = current_value - prev_value
-        state_velocity = (state_velocity * state_momentum + 
-                        target_velocity * (1 - state_momentum))
+        target_velocity = value - prev_value
+        state_velocity = (state_velocity * state_momentum + target_velocity * (1 - state_momentum))
         smooth_value = prev_value + state_velocity
         smooth_value = min(1.0, max(0.0, smooth_value))
     
     # Map state names to display names
     state_display_map = {
-        'deeply_relaxed': "Deeply Relaxed",
-        'strongly_relaxed': "Strongly Relaxed",
-        'moderately_relaxed': "Moderately Relaxed",
-        'slightly_relaxed': "Slightly Relaxed",
-        'neutral': "Neutral",
-        'less_relaxed': "Less Relaxed",
-        'alert': "Alert",
-        'tense': "Tense",
-        'calibrating': "Calibrating",
-        'highly_focused': "Highly Focused",
-        'strongly_focused': "Strongly Focused",
-        'moderately_focused': "Moderately Focused",
-        'slightly_focused': "Slightly Focused",
-        'less_focused': "Less Focused",
-        'less_attentive': "Less Attentive",
-        'distracted': "Distracted"
+        'deeply_relaxed': "Deeply Relaxed", 'strongly_relaxed': "Strongly Relaxed",
+        'moderately_relaxed': "Moderately Relaxed", 'slightly_relaxed': "Slightly Relaxed",
+        'neutral': "Neutral", 'less_relaxed': "Less Relaxed", 'alert': "Alert", 'tense': "Tense",
+        'calibrating': "Calibrating", 'highly_focused': "Highly Focused",
+        'strongly_focused': "Strongly Focused", 'moderately_focused': "Moderately Focused",
+        'slightly_focused': "Slightly Focused", 'less_focused': "Less Focused",
+        'less_attentive': "Less Attentive", 'distracted': "Distracted"
     }
     
     display_state = state_display_map.get(state_name, state_name.title())
     
     return {
-        "state": display_state,
-        "state_key": state_name,
-        "level": level,
-        "confidence": confidence,
-        "value": round(value, 3),
-        "smooth_value": round(smooth_value, 3),
-        "probabilities": state_probs
+        "state": display_state, "state_key": state_name, "level": level,
+        "confidence": confidence, "value": round(value, 3),
+        "smooth_value": round(smooth_value, 3), "probabilities": state_probs
     }
 
 
-def detect_eyes_closed(metrics, baseline_alpha, baseline_ab_ratio):
-    """
-    Eyes closed detection (improved from lsl_recording_exp.py)
-    """
-    is_likely_eyes_closed = (
-        metrics['alpha'] > baseline_alpha * 2.0 and  # Alpha doubled
-        metrics['ab_ratio'] > baseline_ab_ratio * 1.5 and  # A/B ratio increased 50%+
-        metrics['theta'] < metrics['theta'] * 1.2  # Theta didn't increase significantly
-    )
+def data_processing_thread_function():
+    """Thread function for processing EEG data"""
+    global baseline_metrics, running, feedback_log, session_start_time, calibration_complete
     
-    return is_likely_eyes_closed
+    eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
+    last_analysis_time = 0
+    
+    while running:
+        try:
+            # Pull data chunk
+            chunk, timestamps = lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
+            
+            if not chunk:
+                time.sleep(0.01)
+                continue
+                
+            chunk_np = np.array(chunk, dtype=np.float64).T
+            
+            if chunk_np.shape[0] <= max(EEG_CHANNEL_INDICES):
+                continue
+                
+            eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
+            
+            # Extract accelerometer data
+            if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
+                try:
+                    acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]
+                    if acc_chunk.shape[1] > 0:
+                        latest_acc_sample = acc_chunk[:, -1]
+                        signal_quality_validator.add_accelerometer_data(latest_acc_sample)
+                except Exception as e:
+                    pass
+            
+            eeg_chunk_filtered = filter_eeg_data(eeg_chunk)
+            
+            # Add to global buffer
+            global full_session_eeg_data, full_session_eeg_data_raw, full_session_timestamps_lsl
+            full_session_eeg_data = np.append(full_session_eeg_data, eeg_chunk_filtered, axis=1)
+            full_session_eeg_data_raw = np.append(full_session_eeg_data_raw, eeg_chunk, axis=1)
+            
+            if timestamps:
+                full_session_timestamps_lsl.extend(timestamps)
+            
+            eeg_buffer = np.append(eeg_buffer, eeg_chunk_filtered, axis=1)
+            
+            # Process if enough time has passed and we have baseline
+            current_time = time.time()
+            if (current_time - last_analysis_time >= ANALYSIS_WINDOW_SECONDS and 
+                eeg_buffer.shape[1] >= nfft and calibration_complete):
+                
+                segment = eeg_buffer[:, -nfft:]
+                current_metrics = calculate_band_powers(segment)
+                
+                if current_metrics:
+                    signal_quality_validator.add_band_power_data(current_metrics)
+                    signal_quality_validator.add_raw_eeg_data(segment)
+                    
+                    quality = signal_quality_validator.assess_overall_quality()
+                    classification = classify_mental_state(current_metrics)
+                    
+                    time_rel_feedback = current_time - session_start_time if session_start_time else 0
+                    current_reported_state = get_current_user_state_at_time(current_time)
+                    
+                    feedback_log.append({
+                        "time_abs": current_time,
+                        "time_rel": time_rel_feedback,
+                        "metrics": current_metrics,
+                        "prediction": classification["state"],
+                        "state_key": classification["state_key"],
+                        "level": classification["level"],
+                        "confidence": classification["confidence"],
+                        "smooth_value": classification["smooth_value"],
+                        "probabilities": classification["probabilities"],
+                        "signal_quality": quality.quality_level,
+                        "user_reported_state": current_reported_state
+                    })
+                    
+                    quality_log.append({
+                        "time": current_time,
+                        "metrics": {
+                            "movement_score": quality.movement_score,
+                            "band_power_score": quality.band_power_score,
+                            "electrode_contact_score": quality.electrode_contact_score,
+                            "overall_score": quality.overall_score,
+                            "quality_level": quality.quality_level,
+                            "recommendations": quality.recommendations
+                        }
+                    })
+                    
+                    # Print feedback with current user state
+                    print(f"\nFeedback @ {time_rel_feedback:6.1f}s: {classification['state']} (Level {classification['level']})")
+                    print(f"  User State: {current_reported_state} | Quality: {quality.quality_level} ({quality.overall_score:.2f})")
+                    
+                # Reset buffer with overlap
+                eeg_buffer = eeg_buffer[:, -int(nfft * 0.5):]
+                last_analysis_time = current_time
+                
+        except Exception as e:
+            print(f"Data processing error: {e}")
+            time.sleep(0.1)
 
 
 def perform_calibration_phase():
     """Calibration phase with signal quality monitoring"""
-    global baseline_metrics, signal_quality_validator
+    global baseline_metrics, signal_quality_validator, calibration_complete
     
     print(f"\n--- Starting {CALIBRATION_DURATION_SECONDS:.0f} Second Calibration ---")
     print("Please remain in a neutral, resting state.")
@@ -536,7 +616,6 @@ def perform_calibration_phase():
     calibration_start_time = time.time()
     calibration_metrics_list = []
     
-    # Process all metrics during calibration time
     while (time.time() - calibration_start_time < CALIBRATION_DURATION_SECONDS and running):
         chunk, timestamps = lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
         
@@ -544,15 +623,12 @@ def perform_calibration_phase():
             time.sleep(0.01)
             continue
             
-        # Convert to numpy array
         chunk_np = np.array(chunk, dtype=np.float64).T
         
-        # Check if we have enough channels
         if chunk_np.shape[0] <= max(EEG_CHANNEL_INDICES):
-            print(f"Not enough channels in chunk: {chunk_np.shape[0]}")
+            print(f"Not enough channels in chunk: {chunk_np.shape[0]} <= {max(EEG_CHANNEL_INDICES)}")
             continue
             
-        # Extract EEG data
         eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
         
         # Extract accelerometer data if available
@@ -563,12 +639,11 @@ def perform_calibration_phase():
                     latest_acc_sample = acc_chunk[:, -1]
                     signal_quality_validator.add_accelerometer_data(latest_acc_sample)
             except Exception as e:
-                print(f"Could not extract accelerometer data: {e}")
+                pass
         
-        # Process EEG data
         eeg_chunk_filtered = filter_eeg_data(eeg_chunk)
         
-        # Add to global buffer for visualization
+        # Add to global buffer
         global full_session_eeg_data, full_session_eeg_data_raw, full_session_timestamps_lsl
         full_session_eeg_data = np.append(full_session_eeg_data, eeg_chunk_filtered, axis=1)
         full_session_eeg_data_raw = np.append(full_session_eeg_data_raw, eeg_chunk, axis=1)
@@ -582,19 +657,16 @@ def perform_calibration_phase():
             metrics = calculate_band_powers(segment)
             
             if metrics:
-                # Add to quality validator
                 signal_quality_validator.add_band_power_data(metrics)
                 signal_quality_validator.add_raw_eeg_data(segment)
-                
                 calibration_metrics_list.append(metrics)
                 
-                # Check signal quality every second
-                if len(calibration_metrics_list) % 5 == 0:  # Assuming ~5 calculations per second
+                # Check signal quality periodically
+                if len(calibration_metrics_list) % 5 == 0:
                     quality = signal_quality_validator.assess_overall_quality()
-                    print(f"Calibration progress: {((time.time() - calibration_start_time) / CALIBRATION_DURATION_SECONDS) * 100:.0f}% - "
-                          f"Quality: {quality.quality_level} ({quality.overall_score:.2f})")
+                    progress = ((time.time() - calibration_start_time) / CALIBRATION_DURATION_SECONDS) * 100
+                    print(f"Calibration progress: {progress:.0f}% - Quality: {quality.quality_level} ({quality.overall_score:.2f})")
                     
-                    # Store quality info
                     quality_log.append({
                         "time": time.time(),
                         "metrics": {
@@ -607,11 +679,10 @@ def perform_calibration_phase():
                         }
                     })
                     
-                    # If quality is very poor, alert user
                     if quality.overall_score < 0.3:
                         print(f"WARNING: Poor signal quality - {quality.recommendations[0] if quality.recommendations else 'Please adjust headband'}")
     
-    # Calculate baseline from calibration data
+    # Calculate baseline
     if calibration_metrics_list:
         print(f"Creating baseline from {len(calibration_metrics_list)} metrics")
         
@@ -620,307 +691,309 @@ def perform_calibration_phase():
             'beta': np.mean([m['beta'] for m in calibration_metrics_list]),
             'theta': np.mean([m['theta'] for m in calibration_metrics_list])
         }
-        baseline_metrics['ab_ratio'] = (
-            baseline_metrics['alpha'] / baseline_metrics['beta'] 
-            if baseline_metrics['beta'] > 1e-9 else 0
-        )
-        baseline_metrics['bt_ratio'] = (
-            baseline_metrics['beta'] / baseline_metrics['theta'] 
-            if baseline_metrics['theta'] > 1e-9 else 0
-        )
+        baseline_metrics['ab_ratio'] = baseline_metrics['alpha'] / baseline_metrics['beta'] if baseline_metrics['beta'] > 1e-9 else 0
+        baseline_metrics['bt_ratio'] = baseline_metrics['beta'] / baseline_metrics['theta'] if baseline_metrics['theta'] > 1e-9 else 0
         
         print("\n--- Calibration Complete ---")
         for key, val in baseline_metrics.items(): 
             print(f"Baseline {key.replace('_', ' ').title()}: {val:.2f}")
             
+        calibration_complete = True
         return True
     else:
         print("Calibration failed: No metrics collected. Check LSL stream.")
+        calibration_complete = False
         return False
 
 
 def monitor_keyboard_input():
-    """Monitor keyboard for user labels"""
-    global running, user_labels
+    """Monitor keyboard for user labels and state changes"""
+    global running, user_labels, current_user_state
     
     while running:
-        for key in USER_LABELS:
+        # Check for state labels
+        for key in STATE_LABELS:
             if keyboard.is_pressed(key):
-                label = USER_LABELS[key]
-                timestamp = time.time()
-                user_labels.append({
-                    "time": timestamp,
-                    "label": label
-                })
-                print(f"\n>>> User Label: {label} at {timestamp:.2f}s")
+                new_state = STATE_LABELS[key]
+                update_user_state(new_state)
                 time.sleep(0.5)  # Prevent multiple detections
+        
+        # Check for event labels
+        for key in EVENT_LABELS:
+            if keyboard.is_pressed(key):
+                label = EVENT_LABELS[key]
+                timestamp = time.time()
+                user_labels.append({"time": timestamp, "label": label})
+                
+                if session_start_time:
+                    time_rel = timestamp - session_start_time
+                    print(f"\n>>> Event @ {time_rel:.1f}s: {label}")
+                else:
+                    print(f"\n>>> Event: {label}")
+                time.sleep(0.5)
+                
         time.sleep(0.1)
 
 
-def feedback_loop():
-    """Real-time feedback loop with signal quality monitoring and user labeling"""
-    global baseline_metrics, running, feedback_log, quality_log
-    
-    if not baseline_metrics:
-        print("Cannot start feedback loop: baseline not calibrated.")
+def update_plots():
+    """Update all plots with current data"""
+    try:
+        if not plt.get_fignums():  # Check if window was closed
+            return
+            
+        for ax in axs:
+            ax.clear()
+        
+        # Plot 1: Raw EEG with user state background
+        ax = axs[0]
+        if full_session_eeg_data.shape[1] > 0:
+            window_samples = min(full_session_eeg_data.shape[1], int(sampling_rate * 10))
+            recent_data = full_session_eeg_data[:, -window_samples:]
+            time_axis = np.linspace(-window_samples/sampling_rate, 0, recent_data.shape[1])
+            
+            # Add background coloring for user states
+            add_state_background(ax, time_axis)
+            
+            for i in range(NUM_EEG_CHANNELS):
+                ax.plot(time_axis, recent_data[i], label=f'Ch {i+1}', alpha=0.8)
+        
+        ax.set_title(f'Real-time EEG - Current User State: {current_user_state}')
+        ax.set_ylabel('Amplitude (µV)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 2: Band Powers with user state background  
+        ax = axs[1]
+        if feedback_log:
+            recent_feedback = feedback_log[-60:]  # Last 60 entries
+            times = [entry['time_rel'] for entry in recent_feedback]
+            
+            if times:
+                # Add background coloring
+                add_state_background(ax, times)
+                
+                ax.plot(times, [m['metrics']['alpha'] for m in recent_feedback], 
+                       label='Alpha', c='blue', linewidth=1.5)
+                ax.plot(times, [m['metrics']['beta'] for m in recent_feedback], 
+                       label='Beta', c='red', linewidth=1.5)
+                ax.plot(times, [m['metrics']['theta'] for m in recent_feedback], 
+                       label='Theta', c='green', linewidth=1.5)
+                
+                # Plot baselines
+                if baseline_metrics:
+                    baseline_time = [times[0], times[-1]]
+                    ax.plot(baseline_time, [baseline_metrics['alpha']] * 2, 'b--', alpha=0.5)
+                    ax.plot(baseline_time, [baseline_metrics['beta']] * 2, 'r--', alpha=0.5)
+                    ax.plot(baseline_time, [baseline_metrics['theta']] * 2, 'g--', alpha=0.5)
+                
+                # Add event markers
+                add_event_markers(ax, times)
+        
+        ax.set_title('Band Powers with User States')
+        ax.set_ylabel('Power')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Classification vs User State
+        ax = axs[2]
+        if feedback_log:
+            ax_twin = ax.twinx()
+            
+            recent_feedback = feedback_log[-60:]
+            times = [entry['time_rel'] for entry in recent_feedback]
+            levels = [entry['level'] for entry in recent_feedback]
+            
+            if times:
+                # Add background coloring
+                add_state_background(ax, times)
+                
+                ax.plot(times, levels, 'k-', label='Predicted Level', 
+                       drawstyle='steps-post', linewidth=2)
+                ax.set_ylabel('Prediction Level')
+                ax.set_ylim(-3.5, 4.5)
+                
+                # Plot signal quality
+                if quality_log:
+                    quality_times = []
+                    quality_scores = []
+                    for entry in quality_log[-60:]:
+                        if session_start_time and entry['time'] >= session_start_time:
+                            quality_times.append(entry['time'] - session_start_time)
+                            quality_scores.append(entry['metrics']['overall_score'] * 10)
+                    
+                    if quality_times:
+                        ax_twin.plot(quality_times, quality_scores, 'c-.', 
+                                   label='Signal Quality', alpha=0.7)
+                        ax_twin.set_ylabel('Signal Quality (0-10)')
+                        ax_twin.set_ylim(0, 10)
+                
+                # Combined legend
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax_twin.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+                
+                # State level labels
+                state_levels = [-3, -2, -1, 0, 1, 2, 3, 4]
+                if session_type == SESSION_TYPE_RELAX:
+                    state_names = ["Tense", "Alert", "Less Relaxed", "Neutral", 
+                                 "Slightly Relaxed", "Moderately Relaxed", 
+                                 "Strongly Relaxed", "Deeply Relaxed"]
+                else:
+                    state_names = ["Distracted", "Less Attentive", "Less Focused", "Neutral", 
+                                 "Slightly Focused", "Moderately Focused", 
+                                 "Strongly Focused", "Highly Focused"]
+                
+                ax.set_yticks(state_levels)
+                ax.set_yticklabels(state_names, fontsize=8)
+        
+        ax.set_title('Mental State Classification vs User Reports')
+        ax.set_xlabel('Time (s)')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.01)
+        
+    except Exception as e:
+        print(f"Plot update error: {e}")
+
+
+def add_state_background(ax, time_range):
+    """Add background coloring for user states"""
+    if not session_start_time or not user_state_changes or not time_range:
+        return
+        
+    for i, change in enumerate(user_state_changes):
+        if change["time"] >= session_start_time:
+            start_time_rel = change["time"] - session_start_time
+            
+            # Find end time
+            if i + 1 < len(user_state_changes):
+                next_change = user_state_changes[i + 1]
+                if next_change["time"] >= session_start_time:
+                    end_time_rel = next_change["time"] - session_start_time
+                else:
+                    continue
+            else:
+                end_time_rel = max(time_range) if isinstance(time_range, list) else time_range[-1]
+            
+            # Only draw if within current view
+            min_time = min(time_range) if isinstance(time_range, list) else time_range[0]
+            max_time = max(time_range) if isinstance(time_range, list) else time_range[-1]
+            
+            if start_time_rel <= max_time and end_time_rel >= min_time:
+                color = STATE_COLORS.get(change["to_state"], '#FFFFFF')
+                ax.axvspan(start_time_rel, end_time_rel, alpha=0.2, color=color)
+
+
+def add_event_markers(ax, times):
+    """Add event markers to plot"""
+    if not session_start_time or not user_labels or not times:
+        return
+        
+    for label_event in user_labels:
+        if label_event['time'] >= session_start_time:
+            label_time = label_event['time'] - session_start_time
+            if times[0] <= label_time <= times[-1]:
+                ax.axvline(x=label_time, color='purple', linestyle=':', alpha=0.7)
+                ax.text(label_time, ax.get_ylim()[1] * 0.9, label_event['label'], 
+                       rotation=90, ha='right', va='top', alpha=0.8, fontsize=8)
+
+
+def generate_accuracy_report():
+    """Generate classification accuracy report"""
+    if not feedback_log:
+        print("No feedback data available for analysis.")
         return
     
-    print(f"\n--- Starting Real-time Feedback (updates every {ANALYSIS_WINDOW_SECONDS:.1f}s) ---")
-    session_start_time = time.time()  # Start time of feedback phase
+    print("\n=== Classification Accuracy Analysis ===")
     
-    # Start keyboard monitoring thread
-    keyboard_thread = threading.Thread(target=monitor_keyboard_input)
-    keyboard_thread.daemon = True
-    keyboard_thread.start()
+    # Create simplified state mappings for comparison
+    def simplify_predicted_state(state_key, level):
+        if level <= -2:
+            return "Negative"  # Tense/Distracted
+        elif level == -1:
+            return "Slightly Negative"
+        elif level == 0:
+            return "Neutral"
+        elif level == 1:
+            return "Slightly Positive"
+        else:  # level >= 2
+            return "Positive"  # Relaxed/Focused
     
-    # Buffer for more stable processing
-    eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
+    def simplify_user_state(user_state):
+        mapping = {
+            'Very Relaxed': 'Positive',
+            'Relaxed': 'Slightly Positive',
+            'Neutral': 'Neutral',
+            'Focused': 'Slightly Positive',
+            'Very Focused': 'Positive',
+            'Unknown': 'Unknown',
+            'Uncertain': 'Unknown'
+        }
+        return mapping.get(user_state, 'Unknown')
     
-    # Initial visualization
-    update_visualization()
+    # Extract predictions and user states
+    predicted_states = []
+    user_states = []
     
-    while running:
-        loop_start_time = time.time()
-        
-        # Pull data chunk
-        chunk, timestamps = lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
-        
-        if not chunk:
-            time.sleep(0.01)
-            continue
+    for entry in feedback_log:
+        if entry['user_reported_state'] != 'Unknown':
+            predicted = simplify_predicted_state(entry['state_key'], entry['level'])
+            user = simplify_user_state(entry['user_reported_state'])
             
-        # Convert to numpy array
-        chunk_np = np.array(chunk, dtype=np.float64).T
+            if user != 'Unknown':
+                predicted_states.append(predicted)
+                user_states.append(user)
+    
+    if len(predicted_states) < 10:
+        print("Insufficient labeled data for meaningful analysis.")
+        return
+    
+    # Calculate accuracy metrics
+    from collections import Counter
+    
+    correct_predictions = sum(1 for p, u in zip(predicted_states, user_states) if p == u)
+    total_predictions = len(predicted_states)
+    accuracy = correct_predictions / total_predictions
+    
+    print(f"Total labeled predictions: {total_predictions}")
+    print(f"Correct predictions: {correct_predictions}")
+    print(f"Overall accuracy: {accuracy:.2%}")
+    
+    # State distribution
+    user_counter = Counter(user_states)
+    pred_counter = Counter(predicted_states)
+    
+    print(f"\nUser state distribution: {dict(user_counter)}")
+    print(f"Predicted state distribution: {dict(pred_counter)}")
+    
+    # Create confusion matrix if we have sklearn
+    try:
+        from sklearn.metrics import confusion_matrix, classification_report
         
-        # Check if we have enough channels
-        if chunk_np.shape[0] <= max(EEG_CHANNEL_INDICES):
-            continue
-            
-        # Extract EEG data
-        eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
+        # Get unique labels
+        labels = sorted(list(set(user_states + predicted_states)))
         
-        # Extract accelerometer data if available
-        if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
-            try:
-                acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]
-                if acc_chunk.shape[1] > 0:
-                    latest_acc_sample = acc_chunk[:, -1]
-                    signal_quality_validator.add_accelerometer_data(latest_acc_sample)
-            except Exception as e:
-                pass  # Non-critical error
+        cm = confusion_matrix(user_states, predicted_states, labels=labels)
         
-        # Process EEG data
-        eeg_chunk_filtered = filter_eeg_data(eeg_chunk)
+        print(f"\nConfusion Matrix:")
+        print(f"{'':>15} " + " ".join(f"{label:>10}" for label in labels))
+        for i, true_label in enumerate(labels):
+            print(f"{true_label:>15} " + " ".join(f"{cm[i,j]:>10d}" for j in range(len(labels))))
         
-        # Add to global buffer for visualization
-        global full_session_eeg_data, full_session_eeg_data_raw, full_session_timestamps_lsl
-        full_session_eeg_data = np.append(full_session_eeg_data, eeg_chunk_filtered, axis=1)
-        full_session_eeg_data_raw = np.append(full_session_eeg_data_raw, eeg_chunk, axis=1)
+        print(f"\nDetailed Classification Report:")
+        print(classification_report(user_states, predicted_states, labels=labels))
         
-        if timestamps:
-            full_session_timestamps_lsl.extend(timestamps)
-        
-        # Add to local buffer
-        eeg_buffer = np.append(eeg_buffer, eeg_chunk_filtered, axis=1)
-        
-        # Only process if enough time has passed
-        elapsed = time.time() - loop_start_time
-        if elapsed >= ANALYSIS_WINDOW_SECONDS:
-            # If we have enough data for PSD calculation
-            if eeg_buffer.shape[1] >= nfft:
-                segment = eeg_buffer[:, -nfft:]
-                current_metrics = calculate_band_powers(segment)
-                
-                if current_metrics:
-                    # Add to quality validator
-                    signal_quality_validator.add_band_power_data(current_metrics)
-                    signal_quality_validator.add_raw_eeg_data(segment)
-                    
-                    # Get signal quality assessment
-                    quality = signal_quality_validator.assess_overall_quality()
-                    
-                    # Classify mental state
-                    classification = classify_mental_state(current_metrics)
-                    
-                    # Log states
-                    time_rel_feedback = time.time() - session_start_time
-                    feedback_log.append({
-                        "time_abs": time.time(),
-                        "time_rel": time_rel_feedback,
-                        "metrics": current_metrics,
-                        "prediction": classification["state"],
-                        "state_key": classification["state_key"],
-                        "level": classification["level"],
-                        "confidence": classification["confidence"],
-                        "smooth_value": classification["smooth_value"],
-                        "probabilities": classification["probabilities"],
-                        "signal_quality": quality.quality_level
-                    })
-                    
-                    # Log quality
-                    quality_log.append({
-                        "time": time.time(),
-                        "metrics": {
-                            "movement_score": quality.movement_score,
-                            "band_power_score": quality.band_power_score,
-                            "electrode_contact_score": quality.electrode_contact_score,
-                            "overall_score": quality.overall_score,
-                            "quality_level": quality.quality_level,
-                            "recommendations": quality.recommendations
-                        }
-                    })
-                    
-                    # Print feedback
-                    print(f"\nFeedback @ {time_rel_feedback:6.1f}s: {classification['state']} (Level {classification['level']}, Confidence: {classification['confidence']})")
-                    print(f"  Metrics: A/B {current_metrics['ab_ratio']:.2f}(B:{baseline_metrics['ab_ratio']:.2f}), "
-                          f"B/T {current_metrics['bt_ratio']:.2f}(B:{baseline_metrics['bt_ratio']:.2f}), "
-                          f"Alpha {current_metrics['alpha']:.1f}(B:{baseline_metrics['alpha']:.1f})")
-                    print(f"  Quality: {quality.quality_level} ({quality.overall_score:.2f})")
-                    
-                    if quality.recommendations:
-                        print(f"  Recommendations: {quality.recommendations[0]}")
-                    
-                    # Update visualization
-                    if len(feedback_log) % 4 == 0:  # Don't update too frequently
-                        update_visualization()
-                    
-                # Reset buffer with overlap
-                eeg_buffer = eeg_buffer[:, -int(nfft * 0.5):]
-            
-            loop_start_time = time.time()  # Reset loop timer
+    except ImportError:
+        print("sklearn not available for detailed metrics.")
 
 
-def update_visualization():
-    """Update the visualization plots"""
-    plt.figure(fig.number)
+def save_enhanced_session_data():
+    """Save enhanced session data with user states"""
+    global feedback_log, user_labels, user_state_changes, quality_log, baseline_metrics
     
-    # Clear all axes
-    for ax in axs:
-        ax.clear()
-    
-    # Plot 1: Raw EEG for most recent 5 seconds
-    ax = axs[0]
-    window_samples = int(sampling_rate * 5)  # 5 seconds
-    if full_session_eeg_data.shape[1] > window_samples:
-        recent_data = full_session_eeg_data[:, -window_samples:]
-        time_axis = np.linspace(-5, 0, recent_data.shape[1])
-        
-        for i in range(NUM_EEG_CHANNELS):
-            ax.plot(time_axis, recent_data[i], label=f'Channel {i+1}')
-    else:
-        ax.text(0.5, 0.5, 'Collecting data...', ha='center', va='center', transform=ax.transAxes)
-    
-    ax.set_title('Real-time EEG')
-    ax.set_ylabel('Amplitude (µV)')
-    ax.legend(loc='upper right')
-    ax.grid(True)
-    
-    # Plot 2: Band Powers
-    ax = axs[1]
-    if feedback_log:
-        # Extract last 20 entries
-        recent_feedback = feedback_log[-30:]
-        times = [entry['time_rel'] for entry in recent_feedback]
-        baseline_time = [times[0], times[-1]]
-        
-        # Plot band powers
-        ax.plot(times, [m['metrics']['alpha'] for m in recent_feedback], label='Alpha', c='blue')
-        ax.plot(times, [m['metrics']['beta'] for m in recent_feedback], label='Beta', c='red')
-        ax.plot(times, [m['metrics']['theta'] for m in recent_feedback], label='Theta', c='green')
-        
-        # Plot baselines
-        if baseline_metrics:
-            ax.plot(baseline_time, [baseline_metrics['alpha'], baseline_metrics['alpha']], 'b--', alpha=0.5)
-            ax.plot(baseline_time, [baseline_metrics['beta'], baseline_metrics['beta']], 'r--', alpha=0.5)
-            ax.plot(baseline_time, [baseline_metrics['theta'], baseline_metrics['theta']], 'g--', alpha=0.5)
-            
-        # Add user labels
-        for label_event in user_labels:
-            if label_event['time'] >= session_start_time and label_event['time'] - session_start_time <= times[-1]:
-                label_time = label_event['time'] - session_start_time
-                ax.axvline(x=label_time, color='purple', linestyle=':', alpha=0.7)
-                ax.text(label_time, ax.get_ylim()[1] * 0.9, label_event['label'], 
-                        rotation=90, ha='right', va='top', alpha=0.8, fontsize=8)
-    else:
-        ax.text(0.5, 0.5, 'Waiting for feedback...', ha='center', va='center', transform=ax.transAxes)
-    
-    ax.set_title('Band Powers')
-    ax.set_ylabel('Power')
-    ax.legend(loc='upper right')
-    ax.grid(True)
-    
-    # Plot 3: Classification and Signal Quality
-    ax = axs[2]
-    if feedback_log:
-        # Create twin axis
-        ax_twin = ax.twinx()
-        
-        # Extract data
-        times = [entry['time_rel'] for entry in feedback_log[-30:]]
-        levels = [entry['level'] for entry in feedback_log[-30:]]
-        smooth_values = [entry['smooth_value'] * 10 for entry in feedback_log[-30:]]  # Scale to 0-10
-        
-        # Plot classification level
-        ax.plot(times, levels, 'k-', label='State Level', drawstyle='steps-post')
-        ax.set_ylabel('State Level')
-        ax.set_ylim(-3.5, 4.5)
-        
-        # Plot signal quality
-        if quality_log:
-            quality_times = [entry['time'] - session_start_time for entry in quality_log[-30:]]
-            quality_scores = [entry['metrics']['overall_score'] * 10 for entry in quality_log[-30:]]  # Scale to 0-10
-            ax_twin.plot(quality_times, quality_scores, 'c-.', label='Signal Quality', alpha=0.7)
-            ax_twin.set_ylabel('Signal Quality (0-10)')
-            ax_twin.set_ylim(0, 10)
-            
-        # Create combined legend
-        lines1, labels1 = ax.get_legend_handles_labels()
-        lines2, labels2 = ax_twin.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-        
-        # Add state labels on y-axis
-        state_levels = [-3, -2, -1, 0, 1, 2, 3, 4]
-        state_names = [
-            "Tense/Distracted" if session_type == SESSION_TYPE_RELAX else "Distracted",
-            "Alert/Less Attentive" if session_type == SESSION_TYPE_RELAX else "Less Attentive",
-            "Less Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Less Focused",
-            "Neutral",
-            "Slightly Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Slightly Focused",
-            "Moderately Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Moderately Focused",
-            "Strongly Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Strongly Focused",
-            "Deeply Relaxed/Highly Focused" if session_type == SESSION_TYPE_RELAX else "Highly Focused"
-        ]
-        ax.set_yticks(state_levels)
-        ax.set_yticklabels(state_names, fontsize=8)
-        
-        # Add user labels
-        for label_event in user_labels:
-            if label_event['time'] >= session_start_time and label_event['time'] - session_start_time <= times[-1]:
-                label_time = label_event['time'] - session_start_time
-                ax.axvline(x=label_time, color='purple', linestyle=':', alpha=0.7)
-                ax.text(label_time, ax.get_ylim()[1] * 0.9, label_event['label'], 
-                        rotation=90, ha='right', va='top', alpha=0.8, fontsize=8)
-    else:
-        ax.text(0.5, 0.5, 'Waiting for classification...', ha='center', va='center', transform=ax.transAxes)
-    
-    ax.set_title('Mental State Classification & Signal Quality')
-    ax.set_xlabel('Time (s)')
-    ax.grid(True)
-    
-    # Adjust layout
-    plt.tight_layout()
-    plt.draw()
-    plt.pause(0.01)  # Small delay to update the plot
-
-
-def save_session_data():
-    """Save all session data to disk for later analysis"""
-    global full_session_eeg_data, full_session_eeg_data_raw, full_session_timestamps_lsl, feedback_log, user_labels, quality_log, baseline_metrics
-    
-    # Create timestamp for filenames
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create directory if it doesn't exist
     os.makedirs(SAVE_PATH, exist_ok=True)
     
     # Save raw and processed EEG data
@@ -929,15 +1002,15 @@ def save_session_data():
     np.save(os.path.join(SAVE_PATH, f"timestamps_{timestamp_str}.npy"), np.array(full_session_timestamps_lsl))
     
     # Save baseline metrics
-    with open(os.path.join(SAVE_PATH, f"baseline_metrics_{timestamp_str}.pkl"), 'wb') as f:
-        pickle.dump(baseline_metrics, f)
+    if baseline_metrics:
+        with open(os.path.join(SAVE_PATH, f"baseline_metrics_{timestamp_str}.pkl"), 'wb') as f:
+            pickle.dump(baseline_metrics, f)
     
-    # Save feedback log to CSV
+    # Save enhanced feedback log
     if feedback_log:
-        # Create a flattened DataFrame
         feedback_df = pd.DataFrame()
         
-        # Extract basic fields
+        # Basic fields
         feedback_df['time_abs'] = [entry['time_abs'] for entry in feedback_log]
         feedback_df['time_rel'] = [entry['time_rel'] for entry in feedback_log]
         feedback_df['state'] = [entry['prediction'] for entry in feedback_log]
@@ -946,50 +1019,43 @@ def save_session_data():
         feedback_df['confidence'] = [entry['confidence'] for entry in feedback_log]
         feedback_df['smooth_value'] = [entry['smooth_value'] for entry in feedback_log]
         feedback_df['signal_quality'] = [entry['signal_quality'] for entry in feedback_log]
+        feedback_df['user_reported_state'] = [entry['user_reported_state'] for entry in feedback_log]
         
-        # Extract metrics
-        feedback_df['alpha'] = [entry['metrics']['alpha'] for entry in feedback_log]
-        feedback_df['beta'] = [entry['metrics']['beta'] for entry in feedback_log]
-        feedback_df['theta'] = [entry['metrics']['theta'] for entry in feedback_log]
-        feedback_df['ab_ratio'] = [entry['metrics']['ab_ratio'] for entry in feedback_log]
-        feedback_df['bt_ratio'] = [entry['metrics']['bt_ratio'] for entry in feedback_log]
+        # Metrics
+        for metric in ['alpha', 'beta', 'theta', 'ab_ratio', 'bt_ratio']:
+            feedback_df[metric] = [entry['metrics'][metric] for entry in feedback_log]
         
-        # Extract probabilities
+        # Probabilities
         if 'probabilities' in feedback_log[0]:
-            feedback_df['p_relaxed'] = [entry['probabilities']['relaxed'] for entry in feedback_log]
-            feedback_df['p_focused'] = [entry['probabilities']['focused'] for entry in feedback_log]
-            feedback_df['p_drowsy'] = [entry['probabilities']['drowsy'] for entry in feedback_log]
-            feedback_df['p_internal_focus'] = [entry['probabilities']['internal_focus'] for entry in feedback_log]
-            feedback_df['p_neutral'] = [entry['probabilities']['neutral'] for entry in feedback_log]
+            for prob in ['relaxed', 'focused', 'drowsy', 'internal_focus', 'neutral']:
+                feedback_df[f'p_{prob}'] = [entry['probabilities'][prob] for entry in feedback_log]
         
-        # Save to CSV
-        feedback_df.to_csv(os.path.join(SAVE_PATH, f"feedback_log_{timestamp_str}.csv"), index=False)
+        feedback_df.to_csv(os.path.join(SAVE_PATH, f"enhanced_feedback_log_{timestamp_str}.csv"), index=False)
     
-    # Save user labels to CSV
+    # Save user state changes
+    if user_state_changes:
+        state_changes_df = pd.DataFrame(user_state_changes)
+        state_changes_df.to_csv(os.path.join(SAVE_PATH, f"user_state_changes_{timestamp_str}.csv"), index=False)
+    
+    # Save event labels
     if user_labels:
         user_labels_df = pd.DataFrame(user_labels)
-        user_labels_df.to_csv(os.path.join(SAVE_PATH, f"user_labels_{timestamp_str}.csv"), index=False)
+        user_labels_df.to_csv(os.path.join(SAVE_PATH, f"event_labels_{timestamp_str}.csv"), index=False)
     
-    # Save quality log to CSV
+    # Save quality log
     if quality_log:
         quality_df = pd.DataFrame()
-        
         quality_df['time'] = [entry['time'] for entry in quality_log]
-        quality_df['movement_score'] = [entry['metrics']['movement_score'] for entry in quality_log]
-        quality_df['band_power_score'] = [entry['metrics']['band_power_score'] for entry in quality_log]
-        quality_df['electrode_contact_score'] = [entry['metrics']['electrode_contact_score'] for entry in quality_log]
-        quality_df['overall_score'] = [entry['metrics']['overall_score'] for entry in quality_log]
+        for metric in ['movement_score', 'band_power_score', 'electrode_contact_score', 'overall_score']:
+            quality_df[metric] = [entry['metrics'][metric] for entry in quality_log]
         quality_df['quality_level'] = [entry['metrics']['quality_level'] for entry in quality_log]
-        
-        # Extract first recommendation if available
         quality_df['recommendation'] = [
             entry['metrics']['recommendations'][0] if entry['metrics']['recommendations'] else ""
             for entry in quality_log
         ]
-        
         quality_df.to_csv(os.path.join(SAVE_PATH, f"quality_log_{timestamp_str}.csv"), index=False)
     
-    # Save metadata
+    # Save enhanced metadata
     metadata = {
         'session_type': session_type,
         'timestamp': timestamp_str,
@@ -997,231 +1063,21 @@ def save_session_data():
         'calibration_duration': CALIBRATION_DURATION_SECONDS,
         'analysis_window': ANALYSIS_WINDOW_SECONDS,
         'psd_window': PSD_WINDOW_SECONDS,
-        'thresholds': THRESHOLDS
+        'total_feedback_entries': len(feedback_log),
+        'total_state_changes': len(user_state_changes),
+        'total_event_labels': len(user_labels),
+        'state_labels_used': STATE_LABELS,
+        'event_labels_used': EVENT_LABELS
     }
     
-    with open(os.path.join(SAVE_PATH, f"metadata_{timestamp_str}.json"), 'w') as f:
-        import json
+    import json
+    with open(os.path.join(SAVE_PATH, f"enhanced_metadata_{timestamp_str}.json"), 'w') as f:
         json.dump(metadata, f, indent=4)
     
-    print(f"\nSession data saved to: {SAVE_PATH} at {datetime.now().strftime('%H:%M:%S')}")
-
-
-def create_analysis_plots():
-    """Create comprehensive plots for analysis"""
-    if full_session_eeg_data.size == 0 and not feedback_log:
-        print("No data recorded to plot.")
-        return
+    print(f"\nEnhanced session data saved to: {SAVE_PATH}")
     
-    print("\n--- Generating Analysis Plots ---")
-    
-    # Create a new figure for the analysis
-    fig_analysis = plt.figure(figsize=(15, 14))
-    gs = plt.GridSpec(5, 2, figure=fig_analysis)
-    
-    # 1. Raw Data Plot (Top Left)
-    ax1 = fig_analysis.add_subplot(gs[0, 0])
-    time_axis = np.arange(full_session_eeg_data.shape[1]) / sampling_rate
-    for i in range(NUM_EEG_CHANNELS):
-        ax1.plot(time_axis, full_session_eeg_data[i], label=f'Ch {i+1}')
-    ax1.set_title('Filtered EEG Data')
-    ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Amplitude (µV)')
-    ax1.legend(loc='upper right', fontsize='small')
-    ax1.grid(True)
-    
-    # 2. Power Spectrum (Top Right)
-    ax2 = fig_analysis.add_subplot(gs[0, 1])
-    for i in range(NUM_EEG_CHANNELS):
-        frequencies, power_spectral_density = welch(
-            full_session_eeg_data[i], fs=sampling_rate, 
-            nperseg=int(sampling_rate * 4), noverlap=int(sampling_rate * 2)
-        )
-        ax2.semilogy(frequencies, power_spectral_density, label=f'Ch {i+1}')
-        
-    ax2.set_title('Power Spectrum (Entire Session)')
-    ax2.set_xlabel('Frequency (Hz)')
-    ax2.set_ylabel('PSD (µV²/Hz)')
-    ax2.set_xlim(0, 40)  # Only show up to 40Hz
-    ax2.legend(loc='upper right', fontsize='small')
-    ax2.grid(True)
-    
-    # 3. Band Powers Over Time (Middle Left)
-    if feedback_log:
-        ax3 = fig_analysis.add_subplot(gs[1, 0])
-        times = [entry['time_rel'] for entry in feedback_log]
-        
-        ax3.plot(times, [m['metrics']['alpha'] for m in feedback_log], label='Alpha', c='blue')
-        ax3.plot(times, [m['metrics']['beta'] for m in feedback_log], label='Beta', c='red')
-        ax3.plot(times, [m['metrics']['theta'] for m in feedback_log], label='Theta', c='green')
-        
-        # Add baseline lines
-        if baseline_metrics:
-            ax3.axhline(y=baseline_metrics['alpha'], color='blue', linestyle='--', alpha=0.5, label='Alpha Base')
-            ax3.axhline(y=baseline_metrics['beta'], color='red', linestyle='--', alpha=0.5, label='Beta Base')
-            ax3.axhline(y=baseline_metrics['theta'], color='green', linestyle='--', alpha=0.5, label='Theta Base')
-        
-        ax3.set_title('Band Powers Over Time')
-        ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('Power')
-        ax3.legend(loc='upper right', fontsize='small')
-        ax3.grid(True)
-    
-    # 4. Alpha/Beta and Beta/Theta Ratios (Middle Right)
-    if feedback_log:
-        ax4 = fig_analysis.add_subplot(gs[1, 1])
-        ax4_twin = ax4.twinx()
-        
-        times = [entry['time_rel'] for entry in feedback_log]
-        
-        # Alpha/Beta ratio
-        ax4.plot(times, [m['metrics']['ab_ratio'] for m in feedback_log], label='A/B Ratio', c='purple')
-        if baseline_metrics:
-            ax4.axhline(y=baseline_metrics['ab_ratio'], color='purple', linestyle='--', alpha=0.5)
-        ax4.set_ylabel('Alpha/Beta Ratio', color='purple')
-        ax4.tick_params(axis='y', labelcolor='purple')
-        
-        # Beta/Theta ratio
-        ax4_twin.plot(times, [m['metrics']['bt_ratio'] for m in feedback_log], label='B/T Ratio', c='orange')
-        if baseline_metrics:
-            ax4_twin.axhline(y=baseline_metrics['bt_ratio'], color='orange', linestyle='--', alpha=0.5)
-        ax4_twin.set_ylabel('Beta/Theta Ratio', color='orange')
-        ax4_twin.tick_params(axis='y', labelcolor='orange')
-        
-        # Combined legend
-        lines1, labels1 = ax4.get_legend_handles_labels()
-        lines2, labels2 = ax4_twin.get_legend_handles_labels()
-        ax4.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize='small')
-        
-        ax4.set_title('Frequency Band Ratios')
-        ax4.set_xlabel('Time (s)')
-        ax4.grid(True)
-    
-    # 5. Mental State Classification (Bottom Left)
-    if feedback_log:
-        ax5 = fig_analysis.add_subplot(gs[2, 0])
-        
-        times = [entry['time_rel'] for entry in feedback_log]
-        levels = [entry['level'] for entry in feedback_log]
-        
-        ax5.plot(times, levels, 'k-', drawstyle='steps-post')
-        
-        # Add user labels
-        for label_event in user_labels:
-            if label_event['time'] >= session_start_time:
-                label_time = label_event['time'] - session_start_time
-                ax5.axvline(x=label_time, color='purple', linestyle=':', alpha=0.7)
-                ax5.text(label_time, ax5.get_ylim()[1] * 0.9, label_event['label'], 
-                        rotation=90, ha='right', va='top', alpha=0.8, fontsize=8)
-        
-        # State levels
-        state_levels = [-3, -2, -1, 0, 1, 2, 3, 4]
-        state_names = [
-            "Tense/Distracted" if session_type == SESSION_TYPE_RELAX else "Distracted",
-            "Alert/Less Attentive" if session_type == SESSION_TYPE_RELAX else "Less Attentive",
-            "Less Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Less Focused",
-            "Neutral",
-            "Slightly Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Slightly Focused",
-            "Moderately Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Moderately Focused",
-            "Strongly Relaxed/Focused" if session_type == SESSION_TYPE_RELAX else "Strongly Focused",
-            "Deeply Relaxed/Highly Focused" if session_type == SESSION_TYPE_RELAX else "Highly Focused"
-        ]
-        ax5.set_yticks(state_levels)
-        ax5.set_yticklabels(state_names, fontsize=8)
-        
-        ax5.set_title('Mental State Classification')
-        ax5.set_xlabel('Time (s)')
-        ax5.set_ylabel('State Level')
-        ax5.grid(True)
-    
-    # 6. Signal Quality (Bottom Right)
-    if quality_log:
-        ax6 = fig_analysis.add_subplot(gs[2, 1])
-        
-        quality_times = [entry['time'] - session_start_time for entry in quality_log]
-        overall_scores = [entry['metrics']['overall_score'] for entry in quality_log]
-        movement_scores = [entry['metrics']['movement_score'] for entry in quality_log]
-        bp_scores = [entry['metrics']['band_power_score'] for entry in quality_log]
-        electrode_scores = [entry['metrics']['electrode_contact_score'] for entry in quality_log]
-        
-        ax6.plot(quality_times, overall_scores, 'k-', label='Overall Quality')
-        ax6.plot(quality_times, movement_scores, 'b-', alpha=0.6, label='Movement')
-        ax6.plot(quality_times, bp_scores, 'g-', alpha=0.6, label='Band Power')
-        ax6.plot(quality_times, electrode_scores, 'r-', alpha=0.6, label='Electrode')
-        
-        # Add horizontal lines for quality thresholds
-        ax6.axhline(y=0.7, color='g', linestyle='--', alpha=0.7, label='Good')
-        ax6.axhline(y=0.4, color='r', linestyle='--', alpha=0.7, label='Poor')
-        
-        ax6.set_title('Signal Quality Metrics')
-        ax6.set_xlabel('Time (s)')
-        ax6.set_ylabel('Quality Score (0-1)')
-        ax6.set_ylim(0, 1)
-        ax6.legend(loc='lower right', fontsize='small')
-        ax6.grid(True)
-    
-    # 7. Latency Analysis (Bottom)
-    if feedback_log and full_session_timestamps_lsl:
-        ax7 = fig_analysis.add_subplot(gs[3, :])
-        
-        # Calculate and plot latencies between LSL timestamps and processing
-        lsl_times = np.array(full_session_timestamps_lsl)
-        processing_times = np.array([entry['time_abs'] for entry in feedback_log])
-        
-        # Find closest LSL timestamp for each processing timestamp
-        latencies = []
-        for proc_time in processing_times:
-            closest_idx = np.argmin(np.abs(lsl_times - proc_time))
-            latency = (proc_time - lsl_times[closest_idx]) * 1000  # in ms
-            latencies.append(latency)
-        
-        # Plot latency histogram
-        ax7.hist(latencies, bins=20, alpha=0.7)
-        ax7.axvline(x=np.mean(latencies), color='r', linestyle='--', 
-                   label=f'Mean: {np.mean(latencies):.1f} ms')
-        
-        ax7.set_title('Processing Latency Distribution')
-        ax7.set_xlabel('Latency (ms)')
-        ax7.set_ylabel('Frequency')
-        ax7.legend()
-        ax7.grid(True)
-    
-    # 8. State Probability Analysis
-    if feedback_log and 'probabilities' in feedback_log[0]:
-        ax8 = fig_analysis.add_subplot(gs[4, :])
-        
-        times = [entry['time_rel'] for entry in feedback_log]
-        
-        # Plot all state probabilities
-        ax8.plot(times, [entry['probabilities']['relaxed'] for entry in feedback_log], 
-                label='Relaxed', color='blue')
-        ax8.plot(times, [entry['probabilities']['focused'] for entry in feedback_log],
-                label='Focused', color='red')
-        ax8.plot(times, [entry['probabilities']['drowsy'] for entry in feedback_log],
-                label='Drowsy', color='purple')
-        ax8.plot(times, [entry['probabilities']['internal_focus'] for entry in feedback_log],
-                label='Internal Focus', color='orange')
-        ax8.plot(times, [entry['probabilities']['neutral'] for entry in feedback_log],
-                label='Neutral', color='green')
-        
-        # Add user labels
-        for label_event in user_labels:
-            if label_event['time'] >= session_start_time:
-                label_time = label_event['time'] - session_start_time
-                ax8.axvline(x=label_time, color='black', linestyle=':', alpha=0.7)
-                ax8.text(label_time, ax8.get_ylim()[1] * 0.9, label_event['label'], 
-                        rotation=90, ha='right', va='top', alpha=0.8, fontsize=8)
-        
-        ax8.set_title('Mental State Probabilities')
-        ax8.set_xlabel('Time (s)')
-        ax8.set_ylabel('Probability')
-        ax8.set_ylim(0, 1)
-        ax8.legend(loc='upper right')
-        ax8.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(SAVE_PATH, f"analysis_plots_{timestamp_str}.png"), dpi=300)
-    plt.show()
+    # Generate accuracy report
+    generate_accuracy_report()
 
 
 def select_session_type():
@@ -1245,4 +1101,86 @@ def select_session_type():
 
 
 def main():
-    global running, lsl_inlet, session_start_time, full_session_eeg_data, full_session_eeg_
+    global running, session_start_time, data_processing_thread, fig, axs
+    
+    # Select session type
+    select_session_type()
+    
+    # Connect to LSL
+    if not connect_to_lsl():
+        print("Failed to connect to LSL. Exiting.")
+        return
+    
+    # Initialize matplotlib in main thread
+    print("Setting up visualization...")
+    plt.ion()
+    fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    fig.canvas.manager.set_window_title('EEG Testing Interface - Enhanced')
+    plt.show(block=False)
+    
+    # Perform calibration
+    if not perform_calibration_phase():
+        print("Calibration failed. Exiting.")
+        return
+    
+    # Set initial user state and session start time
+    update_user_state("Unknown")
+    session_start_time = time.time()
+    
+    print(f"\n--- Starting Real-time Feedback ---")
+    
+    # Start data processing thread
+    data_processing_thread = threading.Thread(target=data_processing_thread_function)
+    data_processing_thread.daemon = True
+    data_processing_thread.start()
+    
+    # Start keyboard monitoring thread
+    keyboard_thread = threading.Thread(target=monitor_keyboard_input)
+    keyboard_thread.daemon = True
+    keyboard_thread.start()
+    
+    # Main loop - handle plotting and user input
+    last_plot_update = 0
+    try:
+        while running:
+            current_time = time.time()
+            
+            # Update plots every 2 seconds
+            if current_time - last_plot_update >= 2.0:
+                update_plots()
+                last_plot_update = current_time
+            
+            # Process matplotlib events to keep window responsive
+            fig.canvas.flush_events()
+            
+            # Check if plot window was closed
+            if not plt.get_fignums():
+                print("Plot window closed. Ending session.")
+                running = False
+                break
+            
+            time.sleep(0.1)
+            
+    except KeyboardInterrupt:
+        running = False
+    finally:
+        # Save data and generate reports
+        save_enhanced_session_data()
+        
+        if lsl_inlet:
+            lsl_inlet.close_stream()
+        
+        print("\nSession complete. Check the generated plots and CSV files for analysis.")
+        
+        # Keep plot window open for a bit
+        print("Plots will remain open for 10 seconds...")
+        for i in range(100):  # 10 seconds
+            if plt.get_fignums():
+                fig.canvas.flush_events()
+                time.sleep(0.1)
+            else:
+                break
+
+
+if __name__ == "__main__":
+    main()

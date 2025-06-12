@@ -6,7 +6,7 @@ This script loads EEG data from a .npy file and continuously streams it through 
 automatically repeating the signal when it reaches the end.
 
 Usage:
-    python lsl_eeg_simulator_repeat.py --file your_eeg_recording.npy [--speed 1.0]
+    python lsl_eeg_simulator.py --file live_session_data/eeg_data_raw.npy [--speed 1.0]
 """
 
 import numpy as np
