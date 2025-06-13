@@ -120,6 +120,7 @@ class MultiStreamMuseEEGMonitorGUI:
             'GYROSCOPE': None,
             'PPG': None
         }
+        self.lsl_inlet = self.lsl_inlets['EEG']  # Default to EEG inlet
         
         # Stream-specific sampling rates
         self.sampling_rates = {
@@ -729,137 +730,6 @@ class MultiStreamMuseEEGMonitorGUI:
         else:
             return FOCUS_STATES
     
-    def setup_gui(self):
-        """Set up the enhanced GUI layout using grid"""
-        
-        # Top frame - Status and controls (FIXED HEIGHT)
-        self.top_frame = ttk.Frame(self.master, padding=5)
-        self.top_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
-        self.top_frame.grid_columnconfigure(1, weight=1)
-        
-        # Status on left
-        self.status_var = tk.StringVar(value="Status: Disconnected")
-        self.status_label = ttk.Label(self.top_frame, textvariable=self.status_var, font=("Arial", 10))
-        self.status_label.grid(row=0, column=0, sticky="w", padx=5)
-        
-        # Session type in middle with callback
-        session_frame = ttk.Frame(self.top_frame)
-        session_frame.grid(row=0, column=1, padx=20)
-        
-        ttk.Label(session_frame, text="Session:").pack(side=tk.LEFT, padx=(0, 5))
-        self.session_type_var = tk.StringVar(value=SESSION_TYPE_RELAX)
-        session_combo = ttk.Combobox(session_frame, textvariable=self.session_type_var, state="readonly", width=12)
-        session_combo['values'] = (SESSION_TYPE_RELAX, SESSION_TYPE_FOCUS)
-        session_combo.bind('<<ComboboxSelected>>', self.on_session_type_changed)
-        session_combo.pack(side=tk.LEFT)
-        
-        # Current state and quality on right
-        right_frame = ttk.Frame(self.top_frame)
-        right_frame.grid(row=0, column=2, sticky="e", padx=5)
-        
-        self.current_state_var = tk.StringVar(value=f"State: {self.current_user_state}")
-        self.current_state_label = ttk.Label(right_frame, textvariable=self.current_state_var, font=("Arial", 10, "bold"))
-        self.current_state_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Eyes state indicator
-        self.eyes_state_var = tk.StringVar(value="Eyes: Unknown")
-        self.eyes_state_label = ttk.Label(right_frame, textvariable=self.eyes_state_var, font=("Arial", 10))
-        self.eyes_state_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.quality_var = tk.StringVar(value="Quality: Unknown")
-        self.quality_label = ttk.Label(right_frame, textvariable=self.quality_var, font=("Arial", 9))
-        self.quality_label.pack(side=tk.LEFT)
-        
-        # Enhanced prediction frame with eyes state
-        self.prediction_frame = ttk.LabelFrame(self.master, text="Mental State & Eyes Detection", padding=5)
-        self.prediction_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=2)
-        self.prediction_frame.grid_columnconfigure(0, weight=1)
-        
-        # Single row layout for prediction info
-        pred_info_frame = ttk.Frame(self.prediction_frame)
-        pred_info_frame.grid(row=0, column=0, sticky="ew")
-        pred_info_frame.grid_columnconfigure(1, weight=1)
-        
-        # Prediction state (left)
-        self.prediction_state_var = tk.StringVar(value="Unknown")
-        self.prediction_state_label = ttk.Label(pred_info_frame, textvariable=self.prediction_state_var, font=("Arial", 14, "bold"))
-        self.prediction_state_label.grid(row=0, column=0, sticky="w", padx=(0, 20))
-        
-        # Progress bar and details (center)
-        progress_frame = ttk.Frame(pred_info_frame)
-        progress_frame.grid(row=0, column=1, sticky="ew", padx=10)
-        progress_frame.grid_columnconfigure(0, weight=1)
-        
-        self.prediction_details_var = tk.StringVar(value="Level: 0 | Confidence: N/A | Eyes: Unknown")
-        ttk.Label(progress_frame, textvariable=self.prediction_details_var, font=("Arial", 9)).grid(row=0, column=0, sticky="ew")
-        
-        self.prediction_progress = ttk.Progressbar(progress_frame, length=200, mode='determinate')
-        self.prediction_progress.grid(row=1, column=0, sticky="ew", pady=2)
-        
-        # Baseline comparison (right)
-        baseline_frame = ttk.Frame(pred_info_frame)
-        baseline_frame.grid(row=0, column=2, sticky="e")
-        
-        ttk.Label(baseline_frame, text="vs Baseline:", font=("Arial", 8, "bold")).grid(row=0, column=0, sticky="e")
-        
-        self.alpha_comparison_var = tk.StringVar(value="α: N/A")
-        self.beta_comparison_var = tk.StringVar(value="β: N/A")
-        self.theta_comparison_var = tk.StringVar(value="θ: N/A")
-        
-        ttk.Label(baseline_frame, textvariable=self.alpha_comparison_var, font=("Arial", 8)).grid(row=1, column=0, sticky="e")
-        ttk.Label(baseline_frame, textvariable=self.beta_comparison_var, font=("Arial", 8)).grid(row=2, column=0, sticky="e")
-        ttk.Label(baseline_frame, textvariable=self.theta_comparison_var, font=("Arial", 8)).grid(row=3, column=0, sticky="e")
-        
-        # Plot frame (EXPANDABLE)
-        self.plot_frame = ttk.Frame(self.master)
-        self.plot_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=2)
-        self.plot_frame.grid_rowconfigure(0, weight=2)
-        self.plot_frame.grid_rowconfigure(1, weight=1)
-        self.plot_frame.grid_columnconfigure(0, weight=1)
-        
-        # Control buttons frame (FIXED HEIGHT AT BOTTOM)
-        self.control_frame = ttk.Frame(self.master, padding=5)
-        self.control_frame.grid(row=3, column=0, sticky="ew", padx=5, pady=2)
-        
-        # Main control buttons
-        button_frame = ttk.Frame(self.control_frame)
-        button_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5))
-        
-        self.connect_button = ttk.Button(button_frame, text="Connect to Muse", command=self.toggle_connection)
-        self.connect_button.pack(side=tk.LEFT, padx=5)
-        
-        self.calibrate_button = ttk.Button(button_frame, text="Start Calibration", command=self.start_calibration, state=tk.DISABLED)
-        self.calibrate_button.pack(side=tk.LEFT, padx=5)
-        
-        self.save_button = ttk.Button(button_frame, text="Save Session + Plots", command=self.save_session_data, state=tk.DISABLED)
-        self.save_button.pack(side=tk.RIGHT, padx=5)
-        
-        # Dynamic state change buttons frame
-        self.state_frame = ttk.LabelFrame(self.control_frame, text="Report Current State", padding=3)
-        self.state_frame.pack(side=tk.TOP, fill=tk.X, pady=2)
-        
-        # Event buttons in a single row
-        event_frame = ttk.LabelFrame(self.control_frame, text="Mark Events", padding=3)
-        event_frame.pack(side=tk.TOP, fill=tk.X, pady=2)
-        
-        for i, (key, label) in enumerate(EVENT_LABELS.items()):
-            btn = ttk.Button(
-                event_frame, 
-                text=f"{key}: {label.replace('_', ' ')}", 
-                command=lambda l=label: self.add_event_marker(l),
-                width=15
-            )
-            btn.grid(row=0, column=i, padx=1, pady=2, sticky="ew")
-        
-        # Configure event frame columns to expand equally
-        for col in range(len(EVENT_LABELS)):
-            event_frame.grid_columnconfigure(col, weight=1)
-        
-        # Initialize plot canvases
-        self.setup_plots()
-        
-        # Create initial state buttons
-        self.create_state_buttons()
     
     def on_session_type_changed(self, event=None):
         """Handle session type change"""
@@ -1266,6 +1136,7 @@ class MultiStreamMuseEEGMonitorGUI:
     
     def start_calibration(self):
         """Start the enhanced calibration process"""
+        self.lsl_inlet = self.lsl_inlets['EEG']
         if self.lsl_inlet is None:
             messagebox.showwarning("Not Connected", "Please connect to Muse first")
             return
