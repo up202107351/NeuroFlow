@@ -1,0 +1,34 @@
+{
+  "session_type": "RELAXATION",
+  "calibration_start": "2025-06-13T12:22:51.308717",
+  "sampling_rate": 256.0,
+  "filter_params": {
+    "lowcut": 0.5,
+    "highcut": 30.0,
+    "order": 2
+  },
+  "detection_params": {
+    "eyes_closed_threshold": 1.5,
+    "eyes_closed_min_duration": 2.0
+  },
+  "calibration_end": "2025-06-13T12:23:11.351943",
+  "baseline_metrics": {
+    "alpha": 4.636690782422295,
+    "beta": 1.1747299946683478,
+    "theta": 14.317643493466901,
+    "ab_ratio": 3.947026809110578,
+    "bt_ratio": 0.08204771931947975
+  },
+  "calibration_samples": 106,
+  "session_end": "2025-06-13T12:25:08.587588",
+  "total_duration": 117.23564505577087,
+  "statistics": {
+    "mean_prediction_level": 0.23076923076923078,
+    "std_prediction_level": 1.3952582420936197,
+    "mean_confidence": 0.5320329554676102,
+    "num_predictions": 156,
+    "num_state_changes": 7,
+    "num_events": 0,
+    "num_eyes_state_changes": 9
+  }
+}

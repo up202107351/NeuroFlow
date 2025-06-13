@@ -208,6 +208,23 @@ class MultiStreamMuseEEGMonitorGUI:
         
         # Enhanced signal quality validator
         self.signal_quality_validator = SignalQualityValidator()
+
+        # Enhanced prediction smoothing
+        self.prediction_smoothing_window = 5  # Number of predictions to average
+        self.min_confidence_for_change = 0.6   # Minimum confidence to change state
+        self.state_change_threshold = 1.0      # Minimum level change to trigger state change
+        self.last_stable_prediction = None
+        self.stable_prediction_count = 0
+        self.min_stable_count = 3              # Need 3 consistent predictions before changing
+        
+        # Enhanced eyes state tracking
+        self.eyes_detection_history = deque(maxlen=20)
+        self.eyes_closed_confidence = 0.0
+        self.eyes_state_persistence = 5        # Number of samples to maintain state
+        self.current_eyes_persistence = 0
+        
+        # Event marker tracking for plots
+        self.plot_events = []  # Store events with relative timestamps for plotting
         
         # Filtering parameters
         self.filter_b = None
@@ -832,31 +849,6 @@ class MultiStreamMuseEEGMonitorGUI:
         high = HIGHCUT / nyq
         self.filter_b, self.filter_a = scipy.signal.butter(FILTER_ORDER, [low, high], btype='band', analog=False)
     
-    def detect_eyes_closed(self, current_metrics):
-        """Detect if eyes are closed based on alpha power"""
-        if not self.baseline_metrics or not current_metrics:
-            return "Unknown"
-        
-        # Calculate alpha ratio relative to baseline
-        alpha_ratio = current_metrics['alpha'] / self.baseline_metrics['alpha']
-        
-        current_time = time.time()
-        
-        # Eyes likely closed if alpha power is significantly elevated
-        if alpha_ratio > EYES_CLOSED_ALPHA_THRESHOLD:
-            if self.eyes_closed_start_time is None:
-                self.eyes_closed_start_time = current_time
-            elif current_time - self.eyes_closed_start_time > EYES_CLOSED_MIN_DURATION:
-                return "Closed"
-            else:
-                return "Closing"  # Transitional state
-        else:
-            self.eyes_closed_start_time = None
-            return "Open"
-        
-        return "Unknown"
-    
-    
     def filter_eeg_data(self, eeg_data):
         """Apply bandpass filter to EEG data with improved error handling"""
         min_samples = max(3 * FILTER_ORDER + 1, 10)
@@ -921,7 +913,7 @@ class MultiStreamMuseEEGMonitorGUI:
         return avg_metrics
     
     def classify_mental_state(self, current_metrics):
-        """Enhanced classify mental state with session-specific logic"""
+        """Enhanced classify mental state with smoothing and stability"""
         if not self.baseline_metrics or not current_metrics:
             return {
                 "state": "Unknown", "level": 0, "confidence": 0.0,
@@ -933,84 +925,313 @@ class MultiStreamMuseEEGMonitorGUI:
         beta_ratio = current_metrics['beta'] / self.baseline_metrics['beta'] if self.baseline_metrics['beta'] > 0 else 1
         theta_ratio = current_metrics['theta'] / self.baseline_metrics['theta'] if self.baseline_metrics['theta'] > 0 else 1
         
-        # Session-specific classification that matches the user state labels
+        # Session-specific classification
         if self.session_type == SESSION_TYPE_RELAX:
             # For relaxation: higher alpha is better, lower beta/theta is better
             if alpha_ratio > 1.4 and beta_ratio < 0.8:
-                state, level = "Deeply Relaxed", 3
+                raw_state, raw_level = "Deeply Relaxed", 3
+                confidence = min(0.95, 0.5 + (alpha_ratio - 1.4) * 0.3)
             elif alpha_ratio > 1.2:
-                state, level = "Relaxed", 2
+                raw_state, raw_level = "Relaxed", 2
+                confidence = min(0.9, 0.5 + (alpha_ratio - 1.2) * 0.5)
             elif alpha_ratio > 1.05:
-                state, level = "Slightly Relaxed", 1
+                raw_state, raw_level = "Slightly Relaxed", 1
+                confidence = min(0.8, 0.4 + (alpha_ratio - 1.05) * 2.0)
             elif alpha_ratio < 0.8 and beta_ratio > 1.2:
-                state, level = "Tense", -2
+                raw_state, raw_level = "Tense", -2
+                confidence = min(0.9, 0.5 + (1.2 - alpha_ratio) * 0.5)
             elif alpha_ratio < 0.9:
-                state, level = "Slightly Tense", -1
+                raw_state, raw_level = "Slightly Tense", -1
+                confidence = min(0.8, 0.4 + (0.9 - alpha_ratio) * 2.0)
             else:
-                state, level = "Neutral", 0
+                raw_state, raw_level = "Neutral", 0
+                confidence = 0.6
         else:  # FOCUS
-            # For focus: higher beta/theta ratio is better, sustained attention
             bt_ratio = current_metrics['bt_ratio'] / self.baseline_metrics['bt_ratio'] if self.baseline_metrics['bt_ratio'] > 0 else 1
             if bt_ratio > 1.4 and beta_ratio > 1.2:
-                state, level = "Highly Focused", 3
+                raw_state, raw_level = "Highly Focused", 3
+                confidence = min(0.95, 0.5 + (bt_ratio - 1.4) * 0.3)
             elif bt_ratio > 1.2:
-                state, level = "Focused", 2
+                raw_state, raw_level = "Focused", 2
+                confidence = min(0.9, 0.5 + (bt_ratio - 1.2) * 0.5)
             elif bt_ratio > 1.05:
-                state, level = "Slightly Focused", 1
+                raw_state, raw_level = "Slightly Focused", 1
+                confidence = min(0.8, 0.4 + (bt_ratio - 1.05) * 2.0)
             elif bt_ratio < 0.8 or theta_ratio > 1.3:
-                state, level = "Distracted", -2
+                raw_state, raw_level = "Distracted", -2
+                confidence = min(0.9, 0.5 + (0.8 - bt_ratio) * 0.5)
             elif bt_ratio < 0.9:
-                state, level = "Slightly Distracted", -1
+                raw_state, raw_level = "Slightly Distracted", -1
+                confidence = min(0.8, 0.4 + (0.9 - bt_ratio) * 2.0)
             else:
-                state, level = "Neutral", 0
+                raw_state, raw_level = "Neutral", 0
+                confidence = 0.6
         
-        # Calculate confidence and smoothed value
-        confidence = min(1.0, abs(level) / 3.0 + 0.5)
-        value = (level + 3) / 6.0  # Normalize to 0-1
+        # Apply smoothing and stability logic
+        smoothed_prediction = self.apply_prediction_smoothing(raw_state, raw_level, confidence)
         
-        # Simple smoothing
+        return smoothed_prediction
+    
+    def apply_prediction_smoothing(self, raw_state, raw_level, confidence):
+        """Apply smoothing and stability requirements to predictions"""
+        # Calculate smoothed value
+        raw_value = (raw_level + 3) / 6.0  # Normalize to 0-1
+        
+        # Get previous smoothed value
         if self.prediction_history:
-            prev_value = self.prediction_history[-1]['smooth_value']
-            smooth_value = 0.7 * prev_value + 0.3 * value
+            prev_smooth_value = self.prediction_history[-1]['smooth_value']
+            prev_state = self.prediction_history[-1]['state']
+            prev_level = self.prediction_history[-1]['level']
         else:
-            smooth_value = value
+            prev_smooth_value = 0.5
+            prev_state = "Unknown"
+            prev_level = 0
+        
+        # Apply exponential smoothing
+        smoothing_factor = 0.3 if confidence > 0.8 else 0.1  # Faster smoothing for high confidence
+        smooth_value = smoothing_factor * raw_value + (1 - smoothing_factor) * prev_smooth_value
+        
+        # Determine if we should change the displayed state
+        level_change = abs(raw_level - prev_level)
+        
+        # Check stability requirements
+        if (confidence >= self.min_confidence_for_change and 
+            level_change >= self.state_change_threshold):
+            
+            # Check if this is consistent with recent predictions
+            if self.last_stable_prediction == raw_state:
+                self.stable_prediction_count += 1
+            else:
+                self.last_stable_prediction = raw_state
+                self.stable_prediction_count = 1
+            
+            # Only change state if we have enough consistent predictions
+            if self.stable_prediction_count >= self.min_stable_count:
+                final_state = raw_state
+                final_level = raw_level
+                final_confidence = confidence
+            else:
+                # Keep previous state but update smooth_value
+                final_state = prev_state
+                final_level = prev_level
+                final_confidence = confidence * 0.7  # Reduce confidence during transition
+        else:
+            # Not confident enough or change too small - keep previous state
+            final_state = prev_state
+            final_level = prev_level
+            final_confidence = confidence * 0.8
         
         return {
-            "state": state,
-            "state_key": state.lower().replace(' ', '_'),
-            "level": level,
-            "confidence": confidence,
-            "value": value,
-            "smooth_value": smooth_value
+            "state": final_state,
+            "state_key": final_state.lower().replace(' ', '_'),
+            "level": final_level,
+            "confidence": final_confidence,
+            "value": raw_value,
+            "smooth_value": smooth_value,
+            "raw_state": raw_state,
+            "raw_level": raw_level,
+            "raw_confidence": confidence
         }
     
+    def detect_eyes_closed(self, current_metrics):
+        """Enhanced eyes detection with persistence and confidence"""
+        if not self.baseline_metrics or not current_metrics:
+            return "Unknown"
+        
+        # Calculate alpha ratio relative to baseline
+        alpha_ratio = current_metrics['alpha'] / self.baseline_metrics['alpha']
+        
+        # Build confidence score based on alpha elevation
+        if alpha_ratio > EYES_CLOSED_ALPHA_THRESHOLD:
+            confidence_increase = min(0.3, (alpha_ratio - EYES_CLOSED_ALPHA_THRESHOLD) * 0.2)
+            self.eyes_closed_confidence = min(1.0, self.eyes_closed_confidence + confidence_increase)
+        else:
+            confidence_decrease = min(0.2, (EYES_CLOSED_ALPHA_THRESHOLD - alpha_ratio) * 0.1)
+            self.eyes_closed_confidence = max(0.0, self.eyes_closed_confidence - confidence_decrease)
+        
+        # Store detection data
+        self.eyes_detection_history.append({
+            'timestamp': time.time(),
+            'alpha_ratio': alpha_ratio,
+            'confidence': self.eyes_closed_confidence
+        })
+        
+        # Determine state with persistence
+        if self.eyes_closed_confidence > 0.7:
+            if self.eyes_state != "Closed":
+                self.current_eyes_persistence = 0
+            self.current_eyes_persistence += 1
+            
+            if self.current_eyes_persistence >= self.eyes_state_persistence:
+                return "Closed"
+            else:
+                return "Closing"
+        elif self.eyes_closed_confidence < 0.3:
+            if self.eyes_state != "Open":
+                self.current_eyes_persistence = 0
+            self.current_eyes_persistence += 1
+            
+            if self.current_eyes_persistence >= self.eyes_state_persistence:
+                return "Open"
+            else:
+                return "Opening"
+        else:
+            return "Uncertain"
+    
+    def add_event_marker(self, event_label):
+        """Enhanced event marker with plot tracking"""
+        timestamp = time.time()
+        
+        # Calculate relative timestamp for plots
+        if self.session_start_time:
+            relative_time = timestamp - self.session_start_time
+            self.plot_events.append({
+                'time': relative_time,
+                'label': event_label,
+                'absolute_time': timestamp
+            })
+        
+        # Store event in session data
+        self.user_events.append({
+            "time": timestamp,
+            "label": event_label
+        })
+        
+        if self.is_calibrated:
+            self.session_data['events'].append({
+                "time": timestamp,
+                "label": event_label
+            })
+        
+        # Print event with context
+        if self.session_start_time:
+            time_rel = timestamp - self.session_start_time
+            print(f"\n>>> Event @ {time_rel:.1f}s: {event_label}")
+        else:
+            print(f"\n>>> Event: {event_label}")
+    
+    def update_plots(self):
+        """Enhanced plots with event markers and smoother updates"""
+        try:
+            # Update EEG plot (same as before)
+            if len(self.time_buffer) > 0 and all(len(buf) > 0 for buf in self.eeg_data_buffer):
+                if self.session_start_time:
+                    relative_times = np.array([t - self.session_start_time for t in self.time_buffer])
+                else:
+                    relative_times = np.array([t - self.time_buffer[0] for t in self.time_buffer])
+                
+                for i, line in enumerate(self.eeg_lines):
+                    if i < len(self.eeg_data_buffer):
+                        line.set_xdata(relative_times)
+                        line.set_ydata(list(self.eeg_data_buffer[i]))
+                
+                # Add event markers to EEG plot
+                self.clear_event_markers()
+                for event in self.plot_events[-10:]:  # Show last 10 events
+                    if event['time'] >= min(relative_times) and event['time'] <= max(relative_times):
+                        for ax in self.eeg_axes:
+                            line = ax.axvline(event['time'], color='red', linestyle='--', alpha=0.7, linewidth=1)
+                            ax.text(event['time'], ax.get_ylim()[1]*0.9, event['label'][:10], 
+                                   rotation=90, ha='right', va='top', fontsize=7, color='red')
+                
+                if len(relative_times) > 0:
+                    for ax in self.eeg_axes:
+                        ax.set_xlim(min(relative_times), max(relative_times))
+                        
+                        if len(self.eeg_data_buffer[0]) > 0:
+                            all_data = []
+                            for buf in self.eeg_data_buffer:
+                                all_data.extend(buf)
+                            if all_data:
+                                ymin, ymax = min(all_data), max(all_data)
+                                padding = (ymax - ymin) * 0.1 if ymax != ymin else 1
+                                ax.set_ylim(ymin - padding, ymax + padding)
+                
+                self.eeg_canvas.draw_idle()
+            
+            # Update band powers plot with event markers
+            if all(len(self.band_power_buffer[key]) > 0 for key in ['alpha', 'beta', 'theta']):
+                x = np.arange(len(self.band_power_buffer['alpha']))
+                
+                self.alpha_line.set_xdata(x)
+                self.alpha_line.set_ydata(list(self.band_power_buffer['alpha']))
+                
+                self.beta_line.set_xdata(x)
+                self.beta_line.set_ydata(list(self.band_power_buffer['beta']))
+                
+                self.theta_line.set_xdata(x)
+                self.theta_line.set_ydata(list(self.band_power_buffer['theta']))
+                
+                # Add baseline lines if calibrated
+                if self.baseline_metrics:
+                    for band in ['alpha', 'beta', 'theta']:
+                        if hasattr(self, 'baseline_lines') and self.baseline_lines.get(band) is not None:
+                            try:
+                                self.baseline_lines[band].remove()
+                            except:
+                                pass
+                    
+                    if not hasattr(self, 'baseline_lines'):
+                        self.baseline_lines = {}
+                    
+                    colors = {'alpha': 'blue', 'beta': 'red', 'theta': 'green'}
+                    for band, value in self.baseline_metrics.items():
+                        if band in colors:
+                            line = self.band_ax.axhline(value, color=colors[band], alpha=0.7, linestyle=':', linewidth=2)
+                            self.baseline_lines[band] = line
+                
+                # Add event markers to band power plot
+                for event in self.plot_events[-5:]:  # Show last 5 events
+                    if 0 <= event['time'] * 2 <= len(x):  # Rough time scaling
+                        event_x = event['time'] * 2  # Approximate scaling
+                        line = self.band_ax.axvline(event_x, color='green', linestyle='-.', alpha=0.7)
+                        self.band_ax.text(event_x, self.band_ax.get_ylim()[1]*0.9, event['label'][:8], 
+                                         rotation=90, ha='right', va='top', fontsize=7, color='green')
+                
+                if len(x) > 0:
+                    self.band_ax.set_xlim(0, len(x))
+                    
+                    all_values = (list(self.band_power_buffer['alpha']) + 
+                                 list(self.band_power_buffer['beta']) + 
+                                 list(self.band_power_buffer['theta']))
+                    if all_values:
+                        ymin, ymax = min(all_values), max(all_values)
+                        padding = (ymax - ymin) * 0.1 if ymax != ymin else 1
+                        self.band_ax.set_ylim(max(0, ymin - padding), ymax + padding)
+                
+                self.band_canvas.draw_idle()
+                
+        except Exception as e:
+            print(f"Error updating plots: {e}")
+    
+    def clear_event_markers(self):
+        """Clear previous event markers from plots"""
+        # This is a simplified version - you might need to track markers more carefully
+        pass
     
     def update_prediction_display(self):
-        """Update the enhanced prediction display with eyes state"""
+        """Enhanced prediction display with stability info"""
         pred = self.current_prediction
         
-        # Update state text
-        self.prediction_state_var.set(pred['state'])
+        # Update state text with stability indicator
+        confidence_indicator = "●" if pred['confidence'] > 0.8 else "◐" if pred['confidence'] > 0.6 else "○"
+        self.prediction_state_var.set(f"{pred['state']} {confidence_indicator}")
         
-        # Update details with eyes state
+        # Update details with more info
         confidence_pct = pred['confidence'] * 100
-        self.prediction_details_var.set(f"Level: {pred['level']} | Confidence: {confidence_pct:.1f}% | Eyes: {self.eyes_state}")
+        stability = "Stable" if self.stable_prediction_count >= self.min_stable_count else f"Stabilizing ({self.stable_prediction_count}/{self.min_stable_count})"
+        
+        self.prediction_details_var.set(f"Level: {pred['level']} | Confidence: {confidence_pct:.1f}% | {stability} | Eyes: {self.eyes_state}")
         
         # Update progress bar
         progress_value = pred['smooth_value'] * 100
         self.prediction_progress['value'] = progress_value
         
-        # Set color based on state
-        if pred['level'] > 1:
-            color = "green"
-        elif pred['level'] > 0:
-            color = "darkgreen"
-        elif pred['level'] < -1:
-            color = "red"
-        elif pred['level'] < 0:
-            color = "orange"
+        # Set color based on confidence
+        if pred['confidence'] > 0.8:
+            color = "green" if pred['level'] > 0 else "red" if pred['level'] < 0 else "gray"
         else:
-            color = "gray"
+            color = "orange"  # Low confidence
         
         self.prediction_state_label.config(foreground=color)
     
@@ -1060,79 +1281,6 @@ class MultiStreamMuseEEGMonitorGUI:
         self.update_plots()
         self.master.after(PLOT_UPDATE_INTERVAL_MS, self.update_plots_scheduler)
     
-    def update_plots(self):
-        """Update the matplotlib plots with enhanced markers"""
-        try:
-            # Update EEG plot
-            if len(self.time_buffer) > 0 and all(len(buf) > 0 for buf in self.eeg_data_buffer):
-                if self.session_start_time:
-                    relative_times = np.array([t - self.session_start_time for t in self.time_buffer])
-                else:
-                    relative_times = np.array([t - self.time_buffer[0] for t in self.time_buffer])
-                
-                for i, line in enumerate(self.eeg_lines):
-                    if i < len(self.eeg_data_buffer):
-                        line.set_xdata(relative_times)
-                        line.set_ydata(list(self.eeg_data_buffer[i]))
-                
-                if len(relative_times) > 0:
-                    for ax in self.eeg_axes:
-                        ax.set_xlim(min(relative_times), max(relative_times))
-                        
-                        if len(self.eeg_data_buffer[0]) > 0:
-                            all_data = []
-                            for buf in self.eeg_data_buffer:
-                                all_data.extend(buf)
-                            if all_data:
-                                ymin, ymax = min(all_data), max(all_data)
-                                padding = (ymax - ymin) * 0.1 if ymax != ymin else 1
-                                ax.set_ylim(ymin - padding, ymax + padding)
-                
-                self.eeg_canvas.draw_idle()
-            
-            # Update band powers plot with enhanced markers
-            if all(len(self.band_power_buffer[key]) > 0 for key in ['alpha', 'beta', 'theta']):
-                x = np.arange(len(self.band_power_buffer['alpha']))
-                
-                self.alpha_line.set_xdata(x)
-                self.alpha_line.set_ydata(list(self.band_power_buffer['alpha']))
-                
-                self.beta_line.set_xdata(x)
-                self.beta_line.set_ydata(list(self.band_power_buffer['beta']))
-                
-                self.theta_line.set_xdata(x)
-                self.theta_line.set_ydata(list(self.band_power_buffer['theta']))
-                
-                if len(x) > 0:
-                    self.band_ax.set_xlim(0, len(x))
-                    
-                    all_values = (list(self.band_power_buffer['alpha']) + 
-                                 list(self.band_power_buffer['beta']) + 
-                                 list(self.band_power_buffer['theta']))
-                    if all_values:
-                        ymin, ymax = min(all_values), max(all_values)
-                        padding = (ymax - ymin) * 0.1 if ymax != ymin else 1
-                        self.band_ax.set_ylim(max(0, ymin - padding), ymax + padding)
-                
-                # Draw baseline lines if calibrated
-                if self.baseline_metrics:
-                    for band in ['alpha', 'beta', 'theta']:
-                        if self.baseline_lines[band] is not None:
-                            try:
-                                self.baseline_lines[band].remove()
-                            except:
-                                pass
-                    
-                    colors = {'alpha': 'blue', 'beta': 'red', 'theta': 'green'}
-                    for band, value in self.baseline_metrics.items():
-                        if band in colors:
-                            line = self.band_ax.axhline(value, color=colors[band], alpha=0.7, linestyle=':', linewidth=2)
-                            self.baseline_lines[band] = line
-                
-                self.band_canvas.draw_idle()
-                
-        except Exception as e:
-            print(f"Error updating plots: {e}")
     
     def start_calibration(self):
         """Start the enhanced calibration process"""
@@ -1149,10 +1297,16 @@ class MultiStreamMuseEEGMonitorGUI:
         
         self.is_calibrating = True
         self.calibrate_button.config(text="Calibrating...", state=tk.DISABLED)
-        self.status_var.set(f"Status: Calibrating for {CALIBRATION_DURATION_SECONDS} seconds...")
+        
+        # Option 1: Update the prediction state label to show calibration status
+        self.prediction_state_var.set("Calibrating...")
+        self.prediction_details_var.set(f"Collecting baseline for {CALIBRATION_DURATION_SECONDS} seconds...")
+        
+        # Option 2: Or update one of the existing status displays
+        # self.current_state_var.set(f"Calibrating... ({CALIBRATION_DURATION_SECONDS}s)")
         
         threading.Thread(target=self.perform_calibration, daemon=True).start()
-    
+
     def perform_calibration(self):
         """Enhanced calibration with metadata collection"""
         # Reset state
@@ -1160,7 +1314,15 @@ class MultiStreamMuseEEGMonitorGUI:
         self.signal_quality_validator.reset()
         self.session_data = {
             'eeg_raw': [],
-            'timestamps': [],
+            'accelerometer_data': [],
+            'gyroscope_data': [],
+            'ppg_data': [],
+            'timestamps': {
+                'eeg': [],
+                'accelerometer': [],
+                'gyroscope': [],
+                'ppg': []
+            },
             'band_powers': [],
             'predictions': [],
             'state_changes': [],
@@ -1169,7 +1331,7 @@ class MultiStreamMuseEEGMonitorGUI:
             'session_metadata': {
                 'session_type': self.session_type,
                 'calibration_start': datetime.datetime.now().isoformat(),
-                'sampling_rate': self.sampling_rate,
+                'sampling_rate': self.sampling_rates['EEG'],  # Use the correct sampling rate
                 'filter_params': {
                     'lowcut': LOWCUT,
                     'highcut': HIGHCUT,
@@ -1197,8 +1359,8 @@ class MultiStreamMuseEEGMonitorGUI:
             progress = (time.time() - calibration_start_time) / CALIBRATION_DURATION_SECONDS
             self.master.after(0, lambda p=progress: self.update_calibration_progress(p))
             
-            if all(len(buf) >= int(self.sampling_rate * 2) for buf in self.eeg_data_buffer):
-                data_for_analysis = np.array([list(buf)[-int(self.sampling_rate * 2):] for buf in self.eeg_data_buffer])
+            if all(len(buf) >= int(self.sampling_rates['EEG'] * 2) for buf in self.eeg_data_buffer):
+                data_for_analysis = np.array([list(buf)[-int(self.sampling_rates['EEG'] * 2):] for buf in self.eeg_data_buffer])
                 metrics = self.calculate_band_powers(data_for_analysis)
                 
                 if metrics:
@@ -1230,7 +1392,10 @@ class MultiStreamMuseEEGMonitorGUI:
             self.session_data['session_metadata']['baseline_metrics'] = self.baseline_metrics
             self.session_data['session_metadata']['calibration_samples'] = len(calibration_metrics_list)
             
-            self.master.after(0, lambda: self.status_var.set(f"Status: Calibration complete - {self.session_type} session active"))
+            # Update UI to show calibration complete
+            self.master.after(0, lambda: self.prediction_state_var.set("Ready"))
+            self.master.after(0, lambda: self.prediction_details_var.set(f"Calibration complete - {self.session_type} session active"))
+            self.master.after(0, lambda: self.current_state_var.set("State: Ready"))
             self.master.after(0, lambda: self.calibrate_button.config(text="Recalibrate", state=tk.NORMAL))
             self.master.after(0, lambda: self.save_button.config(state=tk.NORMAL))
             
@@ -1239,14 +1404,21 @@ class MultiStreamMuseEEGMonitorGUI:
                 print(f"Baseline {key.replace('_', ' ').title()}: {val:.2f}")
             print(f"Eyes detection threshold: {EYES_CLOSED_ALPHA_THRESHOLD}x alpha baseline")
         else:
-            self.master.after(0, lambda: self.status_var.set("Status: Calibration failed - No valid data"))
+            # Calibration failed
+            self.master.after(0, lambda: self.prediction_state_var.set("Calibration Failed"))
+            self.master.after(0, lambda: self.prediction_details_var.set("No valid data collected - try again"))
             self.master.after(0, lambda: self.calibrate_button.config(text="Start Calibration", state=tk.NORMAL))
         
         self.is_calibrating = False
-    
+
     def update_calibration_progress(self, progress):
         """Update the calibration progress display"""
-        self.status_var.set(f"Status: Calibrating... {progress*100:.0f}%")
+        time_remaining = CALIBRATION_DURATION_SECONDS * (1 - progress)
+        self.prediction_details_var.set(f"Calibrating... {progress*100:.0f}% complete ({time_remaining:.1f}s remaining)")
+        
+        # Update the progress bar if it exists
+        if hasattr(self, 'prediction_progress'):
+            self.prediction_progress['value'] = progress * 100
     
     def update_user_state(self, new_state):
         """Update the current user state"""
@@ -1688,7 +1860,7 @@ class MultiStreamMuseEEGMonitorGUI:
         return saved_plots
     
     def save_session_data(self):
-        """Enhanced save session data with automatic plot generation"""
+        """Enhanced save session data with proper multi-stream timestamp handling"""
         if not self.is_calibrated:
             messagebox.showwarning("Not Calibrated", "Please calibrate before saving data")
             return
@@ -1697,15 +1869,12 @@ class MultiStreamMuseEEGMonitorGUI:
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{self.session_type}_{timestamp_str}"
         
-        # Don't ask for save location
-        target_dir = os.path.join(os.getcwd(), "muse_Test_data")
-        os.makedirs(target_dir, exist_ok=True)  # Create directory if it doesn't exist
-
+        # Create target directory
+        target_dir = os.path.join(os.getcwd(), "muse_test_data")
+        os.makedirs(target_dir, exist_ok=True)
+        
         # Full save path
         save_path = os.path.join(target_dir, filename)
-        
-        if not save_path:
-            return
         
         try:
             # Update session metadata with end time
@@ -1727,25 +1896,70 @@ class MultiStreamMuseEEGMonitorGUI:
                     'num_eyes_state_changes': len(self.session_data['eyes_states'])
                 }
             
-            # Prepare data for saving
+            # Prepare EEG data for saving
             if self.session_data['eeg_raw']:
                 eeg_raw_combined = np.concatenate(self.session_data['eeg_raw'], axis=1)
+                print(f"EEG data shape: {eeg_raw_combined.shape}")
             else:
                 eeg_raw_combined = np.array([])
+                print("Warning: No EEG data collected!")
             
-            # Save to npz file
+            # Prepare timestamps - extract EEG timestamps specifically
+            eeg_timestamps = np.array(self.session_data['timestamps']['eeg']) if self.session_data['timestamps']['eeg'] else np.array([])
+            accelerometer_timestamps = np.array(self.session_data['timestamps']['accelerometer']) if self.session_data['timestamps']['accelerometer'] else np.array([])
+            gyroscope_timestamps = np.array(self.session_data['timestamps']['gyroscope']) if self.session_data['timestamps']['gyroscope'] else np.array([])
+            ppg_timestamps = np.array(self.session_data['timestamps']['ppg']) if self.session_data['timestamps']['ppg'] else np.array([])
+            
+            print(f"EEG timestamps: {len(eeg_timestamps)} samples")
+            print(f"Accelerometer timestamps: {len(accelerometer_timestamps)} samples")
+            print(f"Gyroscope timestamps: {len(gyroscope_timestamps)} samples")
+            print(f"PPG timestamps: {len(ppg_timestamps)} samples")
+            
+            # Prepare accelerometer data
+            if self.session_data['accelerometer_data']:
+                accelerometer_combined = np.concatenate(self.session_data['accelerometer_data'], axis=1)
+                print(f"Accelerometer data shape: {accelerometer_combined.shape}")
+            else:
+                accelerometer_combined = np.array([])
+            
+            # Prepare gyroscope data
+            if self.session_data['gyroscope_data']:
+                gyroscope_combined = np.concatenate(self.session_data['gyroscope_data'], axis=1)
+                print(f"Gyroscope data shape: {gyroscope_combined.shape}")
+            else:
+                gyroscope_combined = np.array([])
+            
+            # Prepare PPG data
+            if self.session_data['ppg_data']:
+                ppg_combined = np.concatenate(self.session_data['ppg_data'], axis=1)
+                print(f"PPG data shape: {ppg_combined.shape}")
+            else:
+                ppg_combined = np.array([])
+            
+            # Save to npz file with proper multi-stream data
             np.savez_compressed(
                 save_path,
+                # Raw sensor data with timestamps
                 eeg_raw=eeg_raw_combined,
-                timestamps=np.array(self.session_data['timestamps']),
+                eeg_timestamps=eeg_timestamps,
+                accelerometer_data=accelerometer_combined,
+                accelerometer_timestamps=accelerometer_timestamps,
+                gyroscope_data=gyroscope_combined,
+                gyroscope_timestamps=gyroscope_timestamps,
+                ppg_data=ppg_combined,
+                ppg_timestamps=ppg_timestamps,
+                
+                # Processed data
                 band_powers=self.session_data['band_powers'],
                 predictions=self.session_data['predictions'],
                 state_changes=self.session_data['state_changes'],
                 events=self.session_data['events'],
                 eyes_states=self.session_data['eyes_states'],
+                
+                # Metadata
                 baseline_metrics=self.baseline_metrics,
                 session_type=self.session_type,
-                sampling_rate=self.sampling_rate,
+                sampling_rates=self.sampling_rates,  # Save all sampling rates
                 channel_names=EEG_CHANNEL_NAMES,
                 session_metadata=self.session_data['session_metadata']
             )
@@ -1766,22 +1980,39 @@ class MultiStreamMuseEEGMonitorGUI:
             
             # Show success message with details
             plot_count = len(saved_plots)
+            
+            # Data size summary
+            data_summary = f"""
+    EEG: {eeg_raw_combined.shape if eeg_raw_combined.size > 0 else 'No data'} 
+    Accelerometer: {accelerometer_combined.shape if accelerometer_combined.size > 0 else 'No data'}
+    Gyroscope: {gyroscope_combined.shape if gyroscope_combined.size > 0 else 'No data'}
+    PPG: {ppg_combined.shape if ppg_combined.size > 0 else 'No data'}"""
+            
             success_msg = f"""Session data saved successfully!
 
-Files created:
-• Data file: {Path(save_path).name}
-• Analysis plots: {plot_count} files
-• Session summary: {Path(summary_path).name}
+    Files created:
+    • Data file: {Path(save_path).name}.npz
+    • Analysis plots: {plot_count} files
+    • Session summary: {Path(summary_path).name}
 
-Session Statistics:
-• Duration: {self.session_data['session_metadata'].get('total_duration', 0):.1f} seconds
-• Predictions: {self.session_data['session_metadata'].get('statistics', {}).get('num_predictions', 0)}
-• State changes: {self.session_data['session_metadata'].get('statistics', {}).get('num_state_changes', 0)}
-• Events: {self.session_data['session_metadata'].get('statistics', {}).get('num_events', 0)}
-• Eyes state changes: {self.session_data['session_metadata'].get('statistics', {}).get('num_eyes_state_changes', 0)}"""
+    Data Summary:{data_summary}
+
+    Session Statistics:
+    • Duration: {self.session_data['session_metadata'].get('total_duration', 0):.1f} seconds
+    • Predictions: {self.session_data['session_metadata'].get('statistics', {}).get('num_predictions', 0)}
+    • State changes: {self.session_data['session_metadata'].get('statistics', {}).get('num_state_changes', 0)}
+    • Events: {self.session_data['session_metadata'].get('statistics', {}).get('num_events', 0)}
+    • Eyes state changes: {self.session_data['session_metadata'].get('statistics', {}).get('num_eyes_state_changes', 0)}"""
             
             messagebox.showinfo("Save Complete", success_msg)
             print(f"Session data and {plot_count} plots saved to: {save_dir}")
+            
+            # Print file info for debugging
+            print(f"\nSaved NPZ file contents:")
+            print(f"- eeg_raw: {eeg_raw_combined.shape if eeg_raw_combined.size > 0 else 'Empty'}")
+            print(f"- eeg_timestamps: {len(eeg_timestamps)} samples")
+            print(f"- accelerometer_data: {accelerometer_combined.shape if accelerometer_combined.size > 0 else 'Empty'}")
+            print(f"- Total file size: ~{os.path.getsize(save_path + '.npz') / 1024 / 1024:.1f} MB")
             
         except Exception as e:
             messagebox.showerror("Save Error", f"Error saving data: {str(e)}")
