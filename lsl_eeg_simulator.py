@@ -6,7 +6,7 @@ This script loads EEG data from a .npy file and continuously streams it through 
 automatically repeating the signal when it reaches the end.
 
 Usage:
-    python lsl_eeg_simulator_repeat.py --file your_eeg_recording.npy [--speed 1.0]
+    python lsl_eeg_simulator.py --file live_session_data/eeg_data_raw.npy [--speed 1.0]
 """
 
 import numpy as np
@@ -35,7 +35,7 @@ class LSLEEGSimulator:
         self.thread = None
         
         # Muse configuration (can be adjusted based on your data)
-        self.n_channels = 4  # TP9, AF7, AF8, TP10
+        self.n_channels = 11  # TP9, AF7, AF8, TP10
         self.sample_rate = 256.0  # Default Muse sampling rate
         self.data = None
         self.outlet = None
@@ -79,7 +79,6 @@ class LSLEEGSimulator:
     
     def create_outlet(self):
         """Create an LSL outlet with appropriate metadata"""
-        # Define the stream info
         stream_info = pylsl.StreamInfo(
             name=self.device_name,
             type='EEG',
@@ -88,33 +87,39 @@ class LSLEEGSimulator:
             channel_format='float32',
             source_id='musesim123'
         )
-        
-        # Add channel information
         channels = stream_info.desc().append_child("channels")
-        
-        # Default channel names for Muse (adjust if your data has different channels)
-        channel_names = ["TP9", "AF7", "AF8", "TP10"]
-        
-        # If we have more/less channels than Muse's default
-        if self.n_channels != len(channel_names):
+
+        # Common Muse channel order for 11 channels
+        channel_names = [
+            "TP9", "AF7", "AF8", "TP10", 
+            "Right AUX", "Left AUX", "AUX3", "AUX4", 
+            "AUX5", "ACC_X", "ACC_Y", "ACC_Z"
+        ]
+        # But you probably only have 11, so drop the last if only 11
+        if self.n_channels == 11:
+            channel_names = [
+                "TP9", "AF7", "AF8", "TP10",
+                "AUX1", "AUX2", "AUX3", "AUX4", "AUX5",
+                "ACC_X", "ACC_Y", "ACC_Z"
+            ]
+        # fallback if something else
+        elif self.n_channels != len(channel_names):
             channel_names = [f"Ch{i+1}" for i in range(self.n_channels)]
-        
-        # Add channels to metadata
+
         for c in range(self.n_channels):
-            if c < len(channel_names):
-                ch_name = channel_names[c]
-            else:
-                ch_name = f"Ch{c+1}"
-                
+            ch_name = channel_names[c] if c < len(channel_names) else f"Ch{c+1}"
+            unit = "microvolts"
+            ch_type = "EEG"
+            if "ACC" in ch_name:
+                unit = "g"
+                ch_type = "Accelerometer"
             channels.append_child("channel") \
                 .append_child_value("label", ch_name) \
-                .append_child_value("unit", "microvolts") \
-                .append_child_value("type", "EEG")
-        
-        # Create the outlet
+                .append_child_value("unit", unit) \
+                .append_child_value("type", ch_type)
+
         self.outlet = pylsl.StreamOutlet(stream_info)
         print(f"Created LSL outlet: {self.device_name} (type: EEG, {self.n_channels} channels @ {self.sample_rate} Hz)")
-        
         return True
     
     def stream_data(self):
