@@ -174,6 +174,9 @@ def connect_to_lsl():
         nfft = DataFilter.get_nearest_power_of_two(int(sampling_rate * PSD_WINDOW_SECONDS))
         welch_overlap_samples = nfft // 2
         
+        print(f"[DEBUG] Updated nfft to {nfft} for sampling rate {sampling_rate} Hz")
+        print(f"[DEBUG] This requires {nfft/sampling_rate:.1f} seconds of data")
+        
         # Create signal quality validator
         signal_quality_validator = SignalQualityValidator()
         
@@ -242,13 +245,17 @@ def filter_eeg_data(eeg_data):
 
 
 def calculate_band_powers(eeg_segment):
-    """Calculate band powers for EEG segment with artifact rejection"""
+    """Calculate band powers with more debug info"""
     if eeg_segment.shape[1] < nfft:
+        print(f"[DEBUG] Segment too small: {eeg_segment.shape[1]} samples (need {nfft})")
         return None
     
     # Apply artifact rejection
     artifact_mask = improved_artifact_rejection(eeg_segment)
-    if np.sum(artifact_mask) < 0.7 * eeg_segment.shape[1]:
+    valid_percentage = np.mean(artifact_mask) * 100
+    
+    if np.sum(artifact_mask) < 0.5 * eeg_segment.shape[1]:  # Lowered from 0.7
+        print(f"[DEBUG] Too many artifacts: only {valid_percentage:.1f}% valid samples")
         return None
     
     metrics_list = []
@@ -273,10 +280,11 @@ def calculate_band_powers(eeg_segment):
                 'beta': DataFilter.get_band_power(psd, BETA_BAND[0], BETA_BAND[1])
             })
         except Exception as e:
-            print(f"PSD calculation error: {e}")
+            print(f"[DEBUG] PSD calculation error on channel {ch_idx}: {e}")
             return None
     
     if len(metrics_list) != NUM_EEG_CHANNELS:
+        print(f"[DEBUG] Incomplete metrics: got {len(metrics_list)}/{NUM_EEG_CHANNELS} channels")
         return None
         
     # Calculate weighted average
@@ -293,17 +301,22 @@ def calculate_band_powers(eeg_segment):
 
 
 def improved_artifact_rejection(eeg_data):
-    """Advanced artifact rejection"""
-    channel_thresholds = [150, 100, 100, 150]
+    """Advanced artifact rejection with less aggressive thresholds"""
+    channel_thresholds = [300, 200, 200, 300]  # Increased from original values
     amplitude_mask = ~np.any(np.abs(eeg_data) > np.array(channel_thresholds).reshape(-1, 1), axis=0)
     
     diff_mask = np.ones(eeg_data.shape[1], dtype=bool)
     if eeg_data.shape[1] > 1:
-        diff_thresholds = [50, 30, 30, 50]
+        diff_thresholds = [100, 60, 60, 100]  # Increased from original values
         diff_mask = ~np.any(
             np.abs(np.diff(eeg_data, axis=1, prepend=eeg_data[:, :1])) > 
             np.array(diff_thresholds).reshape(-1, 1), axis=0
         )
+    
+    # Print artifact rejection stats during calibration
+    valid_percentage = np.mean(amplitude_mask & diff_mask) * 100
+    if valid_percentage < 70:
+        print(f"[DEBUG] Artifact rejection is keeping only {valid_percentage:.1f}% of data")
     
     return amplitude_mask & diff_mask
 
@@ -432,7 +445,7 @@ def classify_mental_state(current_metrics):
 
 def perform_calibration_phase():
     """Calibration phase with signal quality monitoring and DEBUGGING"""
-    global baseline_metrics, signal_quality_validator
+    global baseline_metrics, signal_quality_validator, nfft
 
     print(f"\n--- Starting {CALIBRATION_DURATION_SECONDS:.0f} Second Calibration ---")
     print("Please remain in a neutral, resting state.")
@@ -443,6 +456,9 @@ def perform_calibration_phase():
     sample_counter = 0
     skip_small_chunk_counter = 0
     metrics_fail_counter = 0
+    
+    # Create a buffer to accumulate EEG data
+    eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
 
     # Process all metrics during calibration time
     while (time.time() - calibration_start_time < CALIBRATION_DURATION_SECONDS and running):
@@ -485,10 +501,14 @@ def perform_calibration_phase():
 
         if timestamps:
             full_session_timestamps_lsl.extend(timestamps)
+            
+        # Add to local EEG buffer
+        eeg_buffer = np.append(eeg_buffer, eeg_chunk_filtered, axis=1)
+        print(f"[DEBUG] Current buffer size: {eeg_buffer.shape[1]}/{nfft} samples")
 
         # If we have enough data for PSD calculation
-        if eeg_chunk_filtered.shape[1] >= nfft:
-            segment = eeg_chunk_filtered[:, -nfft:]
+        if eeg_buffer.shape[1] >= nfft:
+            segment = eeg_buffer[:, -nfft:]
             print(f"[DEBUG] Trying to calculate band powers on segment shape: {segment.shape}")
             metrics = calculate_band_powers(segment)
 
@@ -498,6 +518,9 @@ def perform_calibration_phase():
                 signal_quality_validator.add_band_power_data(metrics)
                 signal_quality_validator.add_raw_eeg_data(segment)
                 calibration_metrics_list.append(metrics)
+                
+                # Keep a sliding window with 50% overlap
+                eeg_buffer = eeg_buffer[:, -int(nfft/2):]
             else:
                 metrics_fail_counter += 1
                 print(f"[DEBUG] Failed to calculate metrics for segment at iteration {chunk_counter}")
@@ -512,6 +535,8 @@ def perform_calibration_phase():
 
     print(f"\n[DEBUG SUMMARY] Total chunks: {chunk_counter}, samples: {sample_counter}, small chunks skipped: {skip_small_chunk_counter}, metrics failed: {metrics_fail_counter}")
     print(f"[DEBUG] Total metrics collected: {len(calibration_metrics_list)}")
+    print(f"[DEBUG] Final buffer size: {eeg_buffer.shape[1]} samples")
+    print(f"[DEBUG] Required nfft size: {nfft} samples")
 
     if calibration_metrics_list:
         print(f"Creating baseline from {len(calibration_metrics_list)} metrics")
@@ -535,6 +560,10 @@ def perform_calibration_phase():
         return True
     else:
         print("Calibration failed: No metrics collected. Check LSL stream.")
+        # Additional diagnostic info
+        print(f"[DEBUG] Make sure your Muse is properly connected and sending data.")
+        print(f"[DEBUG] Check that PSD_WINDOW_SECONDS ({PSD_WINDOW_SECONDS}) isn't too large for your sample rate ({sampling_rate}).")
+        print(f"[DEBUG] Current nfft setting requires {nfft/sampling_rate:.1f} seconds of continuous data.")
         return False
 
 
