@@ -619,7 +619,7 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         }
         
         # Special case - use thunder video at random 10% chance when tense/distracted
-        if scene_name in ["very_tense", "tense", "very_distracted", "distracted"] and np.random.random() < 0.1:
+        if scene_name in ["very_tense", "tense", "very_distracted", "distracted"] and np.random.random() < 0.3:
             video_category = "thunder"
         else:
             video_category = video_mapping.get(scene_name, "medium")
