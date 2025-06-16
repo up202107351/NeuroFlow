@@ -50,6 +50,10 @@ THETA_BAND = (4.0, 8.0)
 ALPHA_BAND = (8.0, 13.0)
 BETA_BAND = (13.0, 30.0)
 
+# Session types
+SESSION_TYPE_RELAX = "RELAXATION"
+SESSION_TYPE_FOCUS = "FOCUS"
+
 # Design Butterworth bandpass filter (0.5 - 30 Hz)
 filter_order = 4
 lowcut = 0.5
@@ -118,7 +122,29 @@ class EEGProcessingWorker(QtCore.QObject):
         self.session_eeg_data = []
         self.session_timestamps = []
         
-        # State tracking
+        # Enhanced prediction smoothing and stabilization (from GUI)
+        self.prediction_smoothing_window = 5
+        self.min_confidence_for_change = 0.6
+        self.state_change_threshold = 1.0
+        self.last_stable_prediction = None
+        self.stable_prediction_count = 0
+        self.min_stable_count = 3
+        
+        # Prediction history for smoothing
+        self.prediction_history = []
+        
+        # Current prediction state
+        self.current_prediction = {
+            'state': 'Unknown', 'level': 0, 'confidence': 0.0, 'smooth_value': 0.5
+        }
+        
+        # State tracking with momentum (from GUI)
+        self.state_momentum = 0.75
+        self.state_velocity = 0.0
+        self.level_momentum = 0.8
+        self.level_velocity = 0.0
+        
+        # State thresholds (simplified version of GUI's dynamic thresholds)
         self.current_thresholds = {
             'alpha_incr': [1.10, 1.25, 1.50],
             'alpha_decr': [0.90, 0.80, 0.65],
@@ -131,11 +157,6 @@ class EEGProcessingWorker(QtCore.QObject):
             'bt_ratio_incr': [1.15, 1.30, 1.60],
             'bt_ratio_decr': [0.85, 0.70]
         }
-        
-        self.state_momentum = 0.75
-        self.state_velocity = 0.0
-        self.level_momentum = 0.8
-        self.level_velocity = 0.0
     
     @QtCore.pyqtSlot()
     def initialize(self):
@@ -220,7 +241,7 @@ class EEGProcessingWorker(QtCore.QObject):
     @QtCore.pyqtSlot(str)
     def start_session(self, session_type):
         """Start a new session of the specified type"""
-        if session_type not in ["RELAXATION", "FOCUS"]:
+        if session_type not in [SESSION_TYPE_RELAX, SESSION_TYPE_FOCUS]:
             error_msg = f"Invalid session type: {session_type}"
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
@@ -237,6 +258,14 @@ class EEGProcessingWorker(QtCore.QObject):
         self.recent_metrics_history = []
         self.previous_states = []
         self.signal_quality_validator.reset()
+        
+        # Reset prediction smoothing state
+        self.prediction_history = []
+        self.last_stable_prediction = None
+        self.stable_prediction_count = 0
+        self.current_prediction = {
+            'state': 'Unknown', 'level': 0, 'confidence': 0.0, 'smooth_value': 0.5
+        }
         
         # Clear session data
         self._clear_session_data()
@@ -363,6 +392,11 @@ class EEGProcessingWorker(QtCore.QObject):
         self.signal_quality_validator.reset()
         self.recent_metrics_history = []
         self.previous_states = []
+        
+        # Reset prediction smoothing state
+        self.prediction_history = []
+        self.last_stable_prediction = None
+        self.stable_prediction_count = 0
         
         # Clear buffer
         self.eeg_buffer = np.array([]).reshape(NUM_EEG_CHANNELS, 0)
@@ -677,8 +711,11 @@ class EEGProcessingWorker(QtCore.QObject):
                     if len(self.recent_metrics_history) > 15:  # MAX_HISTORY_SIZE
                         self.recent_metrics_history.pop(0)
                     
-                    # Classify mental state
-                    classification = self._classify_mental_state(current_metrics)
+                    # Classify mental state using enhanced logic from GUI
+                    classification = self._classify_mental_state_enhanced(current_metrics)
+                    
+                    # Store current prediction
+                    self.current_prediction = classification
                     
                     # Prepare prediction data
                     prediction_data = {
@@ -807,129 +844,144 @@ class EEGProcessingWorker(QtCore.QObject):
         
         return amplitude_mask & diff_mask
     
-    def _classify_mental_state(self, current_metrics):
-        """Classify mental state based on current metrics"""
+    def _classify_mental_state_enhanced(self, current_metrics):
+        """Enhanced classify mental state with smoothing and stability (from GUI)"""
         if not self.baseline_metrics or not current_metrics:
             return {
-                "state": "Calibrating",
-                "level": 0,
-                "confidence": "N/A",
-                "value": 0.5,
-                "smooth_value": 0.5,
-                "state_key": "calibrating"
+                "state": "Unknown", "level": 0, "confidence": 0.0,
+                "value": 0.5, "smooth_value": 0.5, "state_key": "unknown"
             }
         
-        # Get state probabilities
-        state_probs = self._calculate_state_probabilities(current_metrics)
+        # Calculate ratios relative to baseline
+        alpha_ratio = current_metrics['alpha'] / self.baseline_metrics['alpha'] if self.baseline_metrics['alpha'] > 0 else 1
+        beta_ratio = current_metrics['beta'] / self.baseline_metrics['beta'] if self.baseline_metrics['beta'] > 0 else 1
+        theta_ratio = current_metrics['theta'] / self.baseline_metrics['theta'] if self.baseline_metrics['theta'] > 0 else 1
         
-        # Determine most probable state
-        most_probable_state = max(state_probs.items(), key=lambda x: x[1])
-        state_name, prob_value = most_probable_state
-        
-        level = 0
-        
-        if self.current_session_type == "RELAXATION":
-            relaxation_value = min(1.0, max(0.0, state_probs['relaxed']))
-            
-            # Calculate alert signal
-            ab_ratio_decrease = self.baseline_metrics['ab_ratio'] / current_metrics['ab_ratio'] - 1.0 if current_metrics['ab_ratio'] > 0 else 0
-            beta_increase = current_metrics['beta'] / self.baseline_metrics['beta'] - 1.0
-            alpha_decrease = 1.0 - current_metrics['alpha'] / self.baseline_metrics['alpha']
-            
-            alert_signal = (0.4 * ab_ratio_decrease + 0.3 * beta_increase + 0.3 * alpha_decrease) * 4.0
-            
-            # Determine relaxation levels
-            if (ab_ratio_decrease > 0.1 and (beta_increase > 0.1 or alpha_decrease > 0.1)):
-                if alert_signal > 1.5:
-                    level = -3
-                    state_name = "tense"
-                elif alert_signal > 1.0:
-                    level = -2
-                    state_name = "alert"
-                else:
-                    level = -1
-                    state_name = "less_relaxed"
-            elif relaxation_value > 0.3:
-                alpha_increase = current_metrics['alpha'] / self.baseline_metrics['alpha'] - 1.0
-                ab_ratio_increase = current_metrics['ab_ratio'] / self.baseline_metrics['ab_ratio'] - 1.0 if self.baseline_metrics['ab_ratio'] > 0 else 0
-                relax_signal = (0.5 * alpha_increase + 0.5 * ab_ratio_increase) * 5.0
-                
-                if relax_signal > 0.5:
-                    level = 4
-                    state_name = "deeply_relaxed"
-                elif relax_signal > 0.25:
-                    level = 3
-                    state_name = "strongly_relaxed"
-                elif relax_signal > 0.1:
-                    level = 2
-                    state_name = "moderately_relaxed"
-                else:
-                    level = 1
-                    state_name = "slightly_relaxed"
+        # Session-specific classification
+        if self.current_session_type == SESSION_TYPE_RELAX:
+            # For relaxation: higher alpha is better, lower beta/theta is better
+            if alpha_ratio > 1.4 and beta_ratio < 0.8:
+                raw_state, raw_level = "Deeply Relaxed", 3
+                confidence = min(0.95, 0.5 + (alpha_ratio - 1.4) * 0.3)
+            elif alpha_ratio > 1.2:
+                raw_state, raw_level = "Relaxed", 2
+                confidence = min(0.9, 0.5 + (alpha_ratio - 1.2) * 0.5)
+            elif alpha_ratio > 1.05:
+                raw_state, raw_level = "Slightly Relaxed", 1
+                confidence = min(0.8, 0.4 + (alpha_ratio - 1.05) * 2.0)
+            elif alpha_ratio < 0.8 and beta_ratio > 1.2:
+                raw_state, raw_level = "Tense", -2
+                confidence = min(0.9, 0.5 + (1.2 - alpha_ratio) * 0.5)
+            elif alpha_ratio < 0.9:
+                raw_state, raw_level = "Slightly Tense", -1
+                confidence = min(0.8, 0.4 + (0.9 - alpha_ratio) * 2.0)
             else:
-                level = 0
-                state_name = "neutral"
+                raw_state, raw_level = "Neutral", 0
+                confidence = 0.6
             
-            value = (level + 3) / 7.0
+            value = (raw_level + 3) / 6.0
             
-        elif self.current_session_type == "FOCUS":
-            # Similar logic for focus
-            focus_value = min(1.0, max(0.0, state_probs['focused']))
-            value = (level + 3) / 7.0
+        elif self.current_session_type == SESSION_TYPE_FOCUS:
+            # For focus: higher beta/theta ratio is better
+            bt_ratio = current_metrics['bt_ratio'] / self.baseline_metrics['bt_ratio'] if self.baseline_metrics['bt_ratio'] > 0 else 1
+            if bt_ratio > 1.4 and beta_ratio > 1.2:
+                raw_state, raw_level = "Highly Focused", 3
+                confidence = min(0.95, 0.5 + (bt_ratio - 1.4) * 0.3)
+            elif bt_ratio > 1.2:
+                raw_state, raw_level = "Focused", 2
+                confidence = min(0.9, 0.5 + (bt_ratio - 1.2) * 0.5)
+            elif bt_ratio > 1.05:
+                raw_state, raw_level = "Slightly Focused", 1
+                confidence = min(0.8, 0.4 + (bt_ratio - 1.05) * 2.0)
+            elif bt_ratio < 0.8 or theta_ratio > 1.3:
+                raw_state, raw_level = "Distracted", -2
+                confidence = min(0.9, 0.5 + (0.8 - bt_ratio) * 0.5)
+            elif bt_ratio < 0.9:
+                raw_state, raw_level = "Slightly Distracted", -1
+                confidence = min(0.8, 0.4 + (0.9 - bt_ratio) * 2.0)
+            else:
+                raw_state, raw_level = "Neutral", 0
+                confidence = 0.6
+            
+            value = (raw_level + 3) / 6.0
         else:
-            value = prob_value
+            raw_state, raw_level = "Unknown", 0
+            confidence = 0.0
+            value = 0.5
         
-        # Determine confidence
-        if prob_value > 0.8:
-            confidence = "high"
-        elif prob_value > 0.65:
-            confidence = "medium"
-        elif prob_value > 0.55:
-            confidence = "low"
+        # Apply smoothing and stability logic
+        smoothed_prediction = self._apply_prediction_smoothing(raw_state, raw_level, confidence, value)
+        
+        return smoothed_prediction
+    
+    def _apply_prediction_smoothing(self, raw_state, raw_level, confidence, raw_value):
+        """Apply smoothing and stability requirements to predictions (from GUI)"""
+        # Get previous smoothed value
+        if self.prediction_history:
+            prev_smooth_value = self.prediction_history[-1]['smooth_value']
+            prev_state = self.prediction_history[-1]['state']
+            prev_level = self.prediction_history[-1]['level']
         else:
-            confidence = "very_low"
+            prev_smooth_value = 0.5
+            prev_state = "Unknown"
+            prev_level = 0
         
-        # Apply temporal smoothing
-        smooth_value = value
+        # Apply exponential smoothing
+        smoothing_factor = 0.3 if confidence > 0.8 else 0.1  # Faster smoothing for high confidence
+        smooth_value = smoothing_factor * raw_value + (1 - smoothing_factor) * prev_smooth_value
         
-        self.previous_states.append((state_name, value, level))
-        if len(self.previous_states) > 5:  # MAX_STATE_HISTORY
-            self.previous_states.pop(0)
+        # Determine if we should change the displayed state
+        level_change = abs(raw_level - prev_level)
         
-        if len(self.previous_states) > 1:
-            current_value = value
-            recent_values = [s[1] for s in self.previous_states]
-            prev_value = recent_values[-2]
+        # Check stability requirements
+        if (confidence >= self.min_confidence_for_change and 
+            level_change >= self.state_change_threshold):
             
-            target_velocity = current_value - prev_value
-            self.state_velocity = (self.state_velocity * self.state_momentum + 
-                                 target_velocity * (1 - self.state_momentum))
-            smooth_value = prev_value + self.state_velocity
-            smooth_value = min(1.0, max(0.0, smooth_value))
+            # Check if this is consistent with recent predictions
+            if self.last_stable_prediction == raw_state:
+                self.stable_prediction_count += 1
+            else:
+                self.last_stable_prediction = raw_state
+                self.stable_prediction_count = 1
+            
+            # Only change state if we have enough consistent predictions
+            if self.stable_prediction_count >= self.min_stable_count:
+                final_state = raw_state
+                final_level = raw_level
+                final_confidence = confidence
+            else:
+                # Keep previous state but update smooth_value
+                final_state = prev_state
+                final_level = prev_level
+                final_confidence = confidence * 0.7  # Reduce confidence during transition
+        else:
+            # Not confident enough or change too small - keep previous state
+            final_state = prev_state
+            final_level = prev_level
+            final_confidence = confidence * 0.8
         
-        # Map state names to display names
-        state_display_map = {
-            'deeply_relaxed': "Deeply Relaxed",
-            'strongly_relaxed': "Strongly Relaxed",
-            'moderately_relaxed': "Moderately Relaxed",
-            'slightly_relaxed': "Slightly Relaxed",
-            'neutral': "Neutral",
-            'less_relaxed': "Less Relaxed",
-            'alert': "Alert",
-            'tense': "Tense",
-            'calibrating': "Calibrating"
+        prediction = {
+            "state": final_state,
+            "state_key": final_state.lower().replace(' ', '_'),
+            "level": final_level,
+            "confidence": final_confidence,
+            "value": raw_value,
+            "smooth_value": smooth_value,
+            "raw_state": raw_state,
+            "raw_level": raw_level,
+            "raw_confidence": confidence
         }
         
-        display_state = state_display_map.get(state_name, state_name.title())
+        # Add to prediction history
+        self.prediction_history.append(prediction)
+        if len(self.prediction_history) > self.prediction_smoothing_window:
+            self.prediction_history.pop(0)
         
-        return {
-            "state": display_state,
-            "state_key": state_name,
-            "level": level,
-            "confidence": confidence,
-            "value": round(value, 3),
-            "smooth_value": round(smooth_value, 3)
-        }
+        return prediction
+    
+    def _classify_mental_state(self, current_metrics):
+        """Legacy classify mental state method - kept for compatibility"""
+        return self._classify_mental_state_enhanced(current_metrics)
     
     def _calculate_state_probabilities(self, current_metrics):
         """Calculate probabilities for different mental states"""
