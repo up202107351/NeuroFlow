@@ -70,6 +70,36 @@ def initialize_database():
             FOREIGN KEY (session_id) REFERENCES sessions (session_id)
         )
     ''')
+
+    # Session Band Data (Alpha, Beta, Theta over time)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_band_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            timestamp REAL NOT NULL,
+            alpha REAL NOT NULL,
+            beta REAL NOT NULL,
+            theta REAL NOT NULL,
+            ab_ratio REAL NOT NULL,
+            bt_ratio REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions (session_id)
+        )
+    ''')
+    
+    # Session EEG Data (Raw EEG channels over time)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_eeg_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            timestamp REAL NOT NULL,
+            channel_0 REAL NOT NULL,
+            channel_1 REAL NOT NULL,
+            channel_2 REAL NOT NULL,
+            channel_3 REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions (session_id)
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print(f"Database initialized/checked at {DATABASE_NAME}")
@@ -285,7 +315,6 @@ def end_session_and_summarize(session_id, end_time):
     percent_on_target = 0.0
     avg_raw_score = metrics_summary['avg_score'] if metrics_summary and metrics_summary['avg_score'] is not None else None
 
-
     if metrics_summary and metrics_summary['total_points'] > 0:
         # This is a simplified calculation. For accurate time_on_target_seconds,
         # you'd need to sum durations between consecutive on_target points.
@@ -305,7 +334,6 @@ def end_session_and_summarize(session_id, end_time):
     conn.commit()
     conn.close()
     print(f"Ended and summarized session ID: {session_id}")
-
 
 def get_all_sessions_summary(user_id):
     conn = get_db_connection()
@@ -335,6 +363,192 @@ def get_session_details(session_id):
     details = cursor.fetchall()
     conn.close()
     return details
+
+def save_session_band_data(bands_dict):
+    """Save band power data for a session"""
+    session_id = bands_dict["session_id"]
+    
+    # Use proper database connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Insert data in chunks for efficiency
+        entries = []
+        for i in range(len(bands_dict["timestamps"])):
+            # Make sure we don't go out of bounds
+            if (i < len(bands_dict["alpha"]) and i < len(bands_dict["beta"]) and 
+                i < len(bands_dict["theta"]) and i < len(bands_dict["ab_ratio"]) and 
+                i < len(bands_dict["bt_ratio"])):
+                entries.append((
+                    session_id,
+                    bands_dict["timestamps"][i],
+                    bands_dict["alpha"][i],
+                    bands_dict["beta"][i],
+                    bands_dict["theta"][i],
+                    bands_dict["ab_ratio"][i],
+                    bands_dict["bt_ratio"][i]
+                ))
+        
+        # Insert in a single transaction for speed
+        cursor.executemany('''
+        INSERT INTO session_band_data 
+        (session_id, timestamp, alpha, beta, theta, ab_ratio, bt_ratio)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', entries)
+        
+        conn.commit()
+        print(f"Saved {len(entries)} band data points for session {session_id}")
+        return True
+    except Exception as e:
+        print(f"Error saving band data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_eeg_data(session_id, eeg_data, timestamps):
+    """Save EEG data for a session"""
+    # Use proper database connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Insert data in chunks
+        entries = []
+        for i in range(min(len(timestamps), len(eeg_data))):
+            # Handle the nested structure of eeg_data
+            if isinstance(eeg_data[i], list) and len(eeg_data[i]) >= 4:
+                entries.append((
+                    session_id,
+                    timestamps[i],
+                    eeg_data[i][0],  # Channel 0
+                    eeg_data[i][1],  # Channel 1  
+                    eeg_data[i][2],  # Channel 2
+                    eeg_data[i][3]   # Channel 3
+                ))
+            
+            # Insert in batches to avoid memory issues with large datasets
+            if len(entries) >= 1000:
+                cursor.executemany('''
+                INSERT INTO session_eeg_data 
+                (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''', entries)
+                entries = []
+        
+        # Insert any remaining entries
+        if entries:
+            cursor.executemany('''
+            INSERT INTO session_eeg_data 
+            (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', entries)
+        
+        conn.commit()
+        print(f"Saved EEG data for session {session_id}")
+        return True
+    except Exception as e:
+        print(f"Error saving EEG data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def get_session_band_data(session_id):
+    """Retrieve band power data for a session"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT timestamp, alpha, beta, theta, ab_ratio, bt_ratio
+            FROM session_band_data 
+            WHERE session_id = ?
+            ORDER BY timestamp
+        ''', (session_id,))
+        
+        results = cursor.fetchall()
+        
+        if results:
+            data = {
+                'timestamps': [row['timestamp'] for row in results],
+                'alpha': [row['alpha'] for row in results],
+                'beta': [row['beta'] for row in results],
+                'theta': [row['theta'] for row in results],
+                'ab_ratio': [row['ab_ratio'] for row in results],
+                'bt_ratio': [row['bt_ratio'] for row in results]
+            }
+            print(f"Retrieved {len(results)} band data points for session {session_id}")
+            return data
+        else:
+            print(f"No band data found for session {session_id}")
+            return None
+            
+    except Exception as e:
+        print(f"Error retrieving session band data: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def get_session_eeg_data(session_id):
+    """Retrieve raw EEG data for a session"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT timestamp, channel_0, channel_1, channel_2, channel_3
+            FROM session_eeg_data 
+            WHERE session_id = ?
+            ORDER BY timestamp
+        ''', (session_id,))
+        
+        results = cursor.fetchall()
+        
+        if results:
+            data = {
+                'timestamps': [row['timestamp'] for row in results],
+                'channel_0': [row['channel_0'] for row in results],
+                'channel_1': [row['channel_1'] for row in results],
+                'channel_2': [row['channel_2'] for row in results],
+                'channel_3': [row['channel_3'] for row in results]
+            }
+            print(f"Retrieved {len(results)} EEG data points for session {session_id}")
+            return data
+        else:
+            print(f"No EEG data found for session {session_id}")
+            return None
+            
+    except Exception as e:
+        print(f"Error retrieving session EEG data: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def add_session_note(session_id, note):
+    """Add a note to a session"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE sessions 
+            SET notes = COALESCE(notes, '') || ? || char(10)
+            WHERE session_id = ?
+        ''', (note, session_id))
+        
+        conn.commit()
+        print(f"Added note to session {session_id}")
+        return True
+    except Exception as e:
+        print(f"Error adding session note: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 def log_session_event(session_id, event_type, prediction_label=None, value=None, level=None, is_on_target=False):
     """
@@ -407,124 +621,6 @@ def ensure_remember_token_column_exists():
         print("remember_token column already exists")
         
     conn.close()
-
-def save_session_band_data(bands_dict):
-    """Save band power data for a session"""
-    session_id = bands_dict["session_id"]
-    
-    # Connect to database
-    conn = sqlite3.connect('your_database.db')
-    cursor = conn.cursor()
-    
-    try:
-        # Create table if it doesn't exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS session_band_data (
-            id INTEGER PRIMARY KEY,
-            session_id INTEGER,
-            timestamp REAL,
-            alpha REAL,
-            beta REAL,
-            theta REAL,
-            ab_ratio REAL,
-            bt_ratio REAL,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )
-        ''')
-        
-        # Insert data in chunks for efficiency
-        entries = []
-        for i in range(len(bands_dict["timestamps"])):
-            # Make sure we don't go out of bounds
-            if i < len(bands_dict["alpha"]) and i < len(bands_dict["beta"]) and \
-               i < len(bands_dict["theta"]) and i < len(bands_dict["ab_ratio"]) and \
-               i < len(bands_dict["bt_ratio"]):
-                entries.append((
-                    session_id,
-                    bands_dict["timestamps"][i],
-                    bands_dict["alpha"][i],
-                    bands_dict["beta"][i],
-                    bands_dict["theta"][i],
-                    bands_dict["ab_ratio"][i],
-                    bands_dict["bt_ratio"][i]
-                ))
-        
-        # Insert in a single transaction for speed
-        cursor.executemany('''
-        INSERT INTO session_band_data 
-        (session_id, timestamp, alpha, beta, theta, ab_ratio, bt_ratio)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', entries)
-        
-        conn.commit()
-        return True
-    except Exception as e:
-        print(f"Error saving band data: {e}")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-def save_session_eeg_data(session_id, eeg_data, timestamps):
-    """Save EEG data for a session"""
-    # This could be stored in a separate table or file due to size
-    # For simplicity, I'll show a minimal SQLite implementation
-    
-    conn = sqlite3.connect('your_database.db')
-    cursor = conn.cursor()
-    
-    try:
-        # Create table if it doesn't exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS session_eeg_data (
-            id INTEGER PRIMARY KEY,
-            session_id INTEGER,
-            timestamp REAL,
-            channel_0 REAL,
-            channel_1 REAL,
-            channel_2 REAL,
-            channel_3 REAL,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )
-        ''')
-        
-        # Insert data in chunks
-        entries = []
-        for i in range(min(len(timestamps), len(eeg_data[0]))):
-            entries.append((
-                session_id,
-                timestamps[i],
-                eeg_data[0][i] if len(eeg_data) > 0 else 0,
-                eeg_data[1][i] if len(eeg_data) > 1 else 0,
-                eeg_data[2][i] if len(eeg_data) > 2 else 0,
-                eeg_data[3][i] if len(eeg_data) > 3 else 0
-            ))
-            
-            # Insert in batches to avoid memory issues with large datasets
-            if len(entries) >= 1000:
-                cursor.executemany('''
-                INSERT INTO session_eeg_data 
-                (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ''', entries)
-                entries = []
-        
-        # Insert any remaining entries
-        if entries:
-            cursor.executemany('''
-            INSERT INTO session_eeg_data 
-            (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', entries)
-        
-        conn.commit()
-        return True
-    except Exception as e:
-        print(f"Error saving EEG data: {e}")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
 
 # Call initialize_database() once when your app starts or when this module is first imported.
 if __name__ == "__main__":
