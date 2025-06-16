@@ -15,12 +15,15 @@ class RelaxationCircle(QtWidgets.QWidget):
         self.animation.setDuration(500)  # Half-second animation
         self.animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         
-    def setLevel(self, value):
+    def setLevel(self, value, level=None):
         """Set level with animation"""
         self.animation.stop()
         self.animation.setStartValue(self.level)
         self.animation.setEndValue(value)
         self.animation.start()
+
+        if level is not None:
+            self.current_level_hint = level
         
     def get_level_anim(self):
         return self.level
@@ -35,6 +38,13 @@ class RelaxationCircle(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         
+        # Use level hint for more accurate colors if available
+        if hasattr(self, 'current_level_hint'):
+            color = self._get_color_for_level(self.current_level_hint)
+        else:
+            # Fallback to your existing logic
+            color = self._get_color_for_value(self.level)
+        
         # Draw background circle (gray)
         pen = QtGui.QPen(QtCore.Qt.transparent)
         painter.setPen(pen)
@@ -43,14 +53,6 @@ class RelaxationCircle(QtWidgets.QWidget):
         background_brush = QtGui.QBrush(QtGui.QColor(70, 70, 70, 180))
         painter.setBrush(background_brush)
         painter.drawEllipse(5, 5, 90, 90)
-        
-        # Calculate color based on level
-        if self.level < 0.3:
-            color = QtGui.QColor(180, 50, 50, 200)  # Red for low relaxation
-        elif self.level < 0.6:
-            color = QtGui.QColor(180, 180, 50, 200)  # Yellow for medium
-        else:
-            color = QtGui.QColor(50, 180, 120, 200)  # Green for high relaxation
             
         # Fill circle based on relaxation level
         filled_brush = QtGui.QBrush(color)
@@ -73,7 +75,20 @@ class RelaxationCircle(QtWidgets.QWidget):
                          QtCore.Qt.AlignCenter, 
                          f"{int(self.level * 100)}%")
 
-
+    def _get_color_for_level(self, level):
+        """More precise colors based on discrete levels"""
+        level_colors = {
+            -3: QtGui.QColor(200, 50, 50, 200),   # Deep red
+            -2: QtGui.QColor(180, 80, 50, 200),   # Red-orange  
+            -1: QtGui.QColor(180, 140, 50, 200),  # Orange
+            0:  QtGui.QColor(100, 150, 200, 200), # Blue (neutral)
+            1:  QtGui.QColor(120, 180, 100, 200), # Light green
+            2:  QtGui.QColor(80, 180, 120, 200),  # Green
+            3:  QtGui.QColor(50, 180, 140, 200),  # Deep green
+            4:  QtGui.QColor(50, 200, 160, 200)   # Brilliant green
+        }
+        return level_colors.get(level, QtGui.QColor(180, 180, 50, 200))
+    
 class VideoPlayerWindow(QtWidgets.QMainWindow):
     session_stopped = QtCore.pyqtSignal()
     recalibration_requested = QtCore.pyqtSignal()
@@ -316,6 +331,7 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         
         print("Signal quality widget added to video player window")
 
+
     def show_signal_quality_panel(self):
         """Show the signal quality panel during calibration"""
         if self.signal_quality_widget:
@@ -497,18 +513,72 @@ class VideoPlayerWindow(QtWidgets.QMainWindow):
         
         QtWidgets.QApplication.processEvents()
 
+    def set_focus_level(self, level, level_hint=None):
+        """Update focus level visualization (same as relaxation but different messaging)"""
+        self.current_level = level
+        
+        # Update circle visualization with animation - same mechanism
+        self.relaxation_circle.setLevel(level, level_hint)
+        
+        # Update placeholder if using it
+        if self.using_placeholder:
+            self.update_placeholder_for_focus_level(level)
+
     def start_focus_video(self):
-        """Start the focus video session"""
+        """Start the focus video session with focus-specific messaging"""
         self.session_type = "FOCUS"
         
         # Hide signal quality panel once calibration is complete
         self.hide_signal_quality_panel()
         
-        # For focus sessions, we can use the same video infrastructure
-        # but might want different visual effects or feedback
-        self.start_relaxation_video()  # Reuse the video system
+        # Try to load video files (same as relaxation)
+        video_found = False
+        for category, filename in self.video_files.items():
+            video_path = os.path.join(os.getcwd(), "assets", "videos", filename)
+            if os.path.exists(video_path):
+                print(f"Found video file: {video_path}")
+                self.load_video_file(filename)
+                video_found = True
+                break
+                
+        if not video_found:
+            print("No video files found. Using placeholder.")
+            self.switch_to_placeholder()
+            
+        # Initialize circle to 50% (same as relaxation)
+        self.relaxation_circle.setLevel(0.5)
         
-        print("Focus video session started")
+        # Update status for focus
+        self.status_bar.hide()
+        self.circle_container.raise_()
+        
+        # Initialize video effect parameters
+        self.blur_amount = 0.0
+        self.playback_rate = 1.0
+        self.brightness = 1.0
+        self.saturation = 1.0
+        
+        self.video_effect_timer.start()
+        QtWidgets.QApplication.processEvents()
+
+    def update_placeholder_for_focus_level(self, level):
+        """Update placeholder visualization for focus levels"""
+        if not self.using_placeholder:
+            return
+            
+        # Focus-themed colors and states
+        if level < 0.3:
+            bg_color = "rgba(220, 20, 60, 0.7)"  # Crimson for distracted
+            state = "Distracted"
+        elif level < 0.6:
+            bg_color = "rgba(75, 0, 130, 0.5)"   # Indigo for neutral focus  
+            state = "Focusing"
+        else:
+            bg_color = "rgba(25, 25, 112, 0.7)"  # MidnightBlue for deep focus
+            state = "Deeply Focused"
+            
+        self.placeholder_widget.setStyleSheet(f"QWidget {{ background-color: {bg_color}; }}")
+        self.placeholder_label.setText(f"Focus State: {state}")
 
     def hide_calibration_progress_bar(self):
         """Hides the progress bar and status bar"""

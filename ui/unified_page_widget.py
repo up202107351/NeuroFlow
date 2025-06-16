@@ -399,7 +399,10 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             self.video_player_window = VideoPlayerWindow(parent=self)
             self.video_player_window.session_stopped.connect(self.handle_video_session_stopped_signal)
             self.video_player_window.recalibration_requested.connect(self.handle_recalibration_request)
-        
+
+        if hasattr(self.video_player_window, 'relaxation_circle'):
+            self.video_player_window.relaxation_circle.session_type = self.eeg_session_type
+
         # Add signal quality widget to video player
         if not hasattr(self.video_player_window, 'signal_quality_widget'):
             self.video_player_window.signal_quality_widget = SignalQualityWidget()
@@ -778,9 +781,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             else:
                 scene, status_msg = "deeply_relaxed", f"{state} (Perfect!)"
             
-            self.video_player_window.set_scene(scene)
-            self.video_player_window.set_status(f"Status: {status_msg}")
-            self.video_player_window.set_relaxation_level(smooth_value)
         else:
             # Focus-focused feedback
             if level <= -3:
@@ -800,9 +800,36 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             else:
                 scene, status_msg = "deeply_focused", f"{state} (Perfect focus!)"
 
+        if (level != getattr(self, 'last_scene_level', None) and time.time() - getattr(self, 'last_scene_change', 0) > 2.0):  # 2 sec minimum
             self.video_player_window.set_scene(scene)
             self.video_player_window.set_status(f"Status: {status_msg}")
-            self.video_player_window.set_focus_level(smooth_value)
+            
+            self.last_scene_level = level
+            self.last_scene_change = time.time()
+    
+        # Circle can update more frequently but with level-aware smoothing
+        self._update_circle_with_level_awareness(level, smooth_value)
+
+            
+    def _update_circle_with_level_awareness(self, level, smooth_value):
+        """Blend level-based targets with smooth values"""
+        
+        # Define target circle values for each level
+        level_targets = {
+            -3: 0.05, -2: 0.15, -1: 0.35, 0: 0.50,
+            1: 0.65, 2: 0.80, 3: 0.92, 4: 0.98
+        }
+        
+        # Get ideal target for this level
+        level_target = level_targets.get(level, 0.5)
+        
+        # Blend with smooth_value (you can adjust the ratio)
+        final_value = 0.7 * smooth_value + 0.3 * level_target
+        
+        if self.page_type == "meditation":
+            self.video_player_window.set_relaxation_level(final_value)
+        else:  # focus
+            self.video_player_window.set_focus_level(final_value)
 
     def update_work_feedback(self, state, level, smooth_value):
         """Update work session feedback"""
