@@ -60,6 +60,12 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_monitor_timer = None
         self.unity_data_timer = None
         
+        # SESSION METRICS ACCUMULATION - NEW APPROACH
+        self.session_predictions = []
+        self.session_on_target = []
+        self.session_prediction_timestamps = []
+        self.session_confidence_scores = []
+        
         # Page-specific configuration
         self._setup_page_config()
         
@@ -373,6 +379,9 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Session Active", "A session is already running.")
             return
 
+        # CLEAR SESSION METRICS ARRAYS - NEW
+        self._clear_session_metrics()
+
         # Setup EEG worker
         if not self._setup_eeg_worker():
             QtWidgets.QMessageBox.critical(self, "EEG Setup Error", "Failed to initialize EEG processing system.")
@@ -385,6 +394,14 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             self._start_unity_session()
         elif session_subtype == "work" and self.page_type == "focus":
             self._start_work_session()
+
+    def _clear_session_metrics(self):
+        """Clear session metrics arrays for new session - NEW METHOD"""
+        self.session_predictions = []
+        self.session_on_target = []
+        self.session_prediction_timestamps = []
+        self.session_confidence_scores = []
+        print("Page Widget: Cleared session metrics arrays")
 
     def _start_video_session(self):
         """Start video feedback session"""
@@ -670,7 +687,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(dict)
     def on_new_eeg_prediction(self, prediction_data):
-        """Handle new EEG predictions from worker"""
+        """Handle new EEG predictions from worker - UPDATED TO ACCUMULATE"""
         if self.is_calibrating or not self.is_calibrated:
             return
             
@@ -682,8 +699,22 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         level = classification.get("level", 0)
         smooth_value = classification.get("smooth_value", 0.5)
         state_key = classification.get("state_key", "neutral")
+        confidence = classification.get("confidence", 0.0)
 
         self.last_prediction = classification
+
+        # ACCUMULATE SESSION METRICS - NEW APPROACH
+        current_time = time.time()
+        is_on_target = level > 0  # Simplified on-target logic
+        
+        self.session_predictions.append(state)
+        self.session_on_target.append(is_on_target)
+        self.session_prediction_timestamps.append(current_time)
+        self.session_confidence_scores.append(confidence)
+        
+        # Debug print occasionally
+        if len(self.session_predictions) % 20 == 0:
+            print(f"Page Widget: Accumulated {len(self.session_predictions)} predictions")
 
         # Send to Unity if connected
         if self.client and self.session_goal and "UNITY" in self.session_goal:
@@ -700,11 +731,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         # Update work session feedback
         if hasattr(self, 'focus_indicator') and self.session_goal == "FOCUS":
             self.update_work_feedback(state, level, smooth_value)
-
-        # Store session metrics
-        if self.current_session_id:
-            is_on_target = level > 0
-            db_manager.add_session_metric(self.current_session_id, state, is_on_target, smooth_value)
 
     @QtCore.pyqtSlot(dict)
     def on_signal_quality_update(self, quality_data):
@@ -732,31 +758,39 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         """Handle session data from EEG worker for saving"""
         if self.current_session_id:
             try:
-                bands_dict = {
-                    "session_id": self.current_session_id,
-                    "alpha": session_data["band_data"]["alpha"],
-                    "beta": session_data["band_data"]["beta"],
-                    "theta": session_data["band_data"]["theta"],
-                    "ab_ratio": session_data["band_data"]["ab_ratio"],
-                    "bt_ratio": session_data["band_data"]["bt_ratio"],
-                    "timestamps": session_data["timestamps"]
-                }
+                # Save accumulated session metrics as arrays - NEW APPROACH
+                if self.session_predictions:
+                    print(f"Page Widget: Saving {len(self.session_predictions)} session metrics as arrays")
+                    db_manager.save_session_metrics_batch(
+                        self.current_session_id,
+                        self.session_predictions,
+                        self.session_on_target,
+                        self.session_prediction_timestamps
+                    )
                 
-                db_manager.save_session_band_data(bands_dict)
+                # Save band data
+                if session_data.get("band_data") and session_data["band_data"].get("alpha"):
+                    print(f"Page Widget: Saving {len(session_data['band_data']['alpha'])} band data points")
+                    db_manager.save_session_band_data_batch(
+                        self.current_session_id,
+                        session_data["band_data"]
+                    )
                 
-                if session_data["eeg_data"]:
-                    db_manager.save_session_eeg_data(
-                        self.current_session_id, 
-                        session_data["eeg_data"], 
-                        session_data["timestamps"]
+                # Save EEG data
+                if session_data.get("eeg_data") and session_data["eeg_data"].get("channel_0"):
+                    print(f"Page Widget: Saving {len(session_data['eeg_data']['channel_0'])} EEG data points")
+                    db_manager.save_session_eeg_data_batch(
+                        self.current_session_id,
+                        session_data["eeg_data"],
+                        session_data.get("sampling_rate", 256.0)
                     )
                     
-                print("Session data saved successfully")
+                print("Page Widget: Session data saved successfully")
                 
             except Exception as e:
-                print(f"Error saving session data: {e}")
+                print(f"Page Widget: Error saving session data: {e}")
 
-    # Feedback Methods
+    # Feedback Methods (unchanged)
     def update_video_feedback(self, state, level, smooth_value, state_key):
         """Update video feedback based on EEG state and page type"""
         if not self.session_goal or not self.video_player_window:
@@ -950,12 +984,15 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_alert_shown = False
         self.last_sent_scene_index = -1
         
+        # Clear session metrics arrays - NEW
+        self._clear_session_metrics()
+        
         if self.main_app_window and hasattr(self.main_app_window, 'is_lsl_connected'):
             self.update_button_states(self.main_app_window.is_lsl_connected)
         else:
             self.update_button_states(False)
 
-    # Focus-specific methods
+    # Focus-specific methods (unchanged)
     def _check_focus_levels(self):
         """Analyze focus history to detect significant drops (focus page only)"""
         if not self.focus_monitoring_active or len(self.focus_history) < 10:
@@ -1008,7 +1045,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.stop_active_session()
         event.accept()
 
-    # Unity-specific methods
+    # Unity-specific methods (unchanged)
     def on_unity_calibration_progress(self, progress):
         """Update Unity calibration dialog with progress"""
         if hasattr(self, 'calibration_dialog'):
@@ -1095,7 +1132,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.session_goal = None
         self.update_button_states(self.main_app_window.is_lsl_connected)
 
-    # Utility methods
+    # Utility methods (unchanged)
     def handle_recalibration_request(self):
         """Handle user request to recalibrate due to poor signal quality"""
         reply = QtWidgets.QMessageBox.question(

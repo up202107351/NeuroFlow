@@ -89,6 +89,49 @@ class RelaxationCircle(QtWidgets.QWidget):
         }
         return level_colors.get(level, QtGui.QColor(180, 180, 50, 200))
     
+    def _get_color_for_value(self, value):
+        """Fallback color method based on continuous value (0.0-1.0)"""
+        if self.session_type == "FOCUS":
+            # Focus colors: red (distracted) -> blue (focused)
+            if value < 0.3:
+                # Distracted: red to orange
+                red = 220
+                green = int(20 + (value / 0.3) * 49)  # 20 to 69
+                blue = 60
+            elif value < 0.6:
+                # Neutral: orange to blue
+                progress = (value - 0.3) / 0.3
+                red = int(255 - progress * 155)  # 255 to 100
+                green = int(69 + progress * 80)   # 69 to 149
+                blue = int(0 + progress * 237)    # 0 to 237
+            else:
+                # Focused: blue shades
+                progress = (value - 0.6) / 0.4
+                red = int(100 - progress * 100)  # 100 to 0
+                green = int(149 - progress * 149) # 149 to 0
+                blue = int(237 - progress * 98)   # 237 to 139
+        else:
+            # Relaxation colors: red (tense) -> green (relaxed)
+            if value < 0.3:
+                # Tense: red shades
+                red = int(200 - value * 20)  # 200 to 180
+                green = int(50 + value * 90)  # 50 to 140
+                blue = 50
+            elif value < 0.6:
+                # Neutral: orange to light green
+                progress = (value - 0.3) / 0.3
+                red = int(180 - progress * 80)  # 180 to 100
+                green = int(140 + progress * 10) # 140 to 150
+                blue = int(50 + progress * 150)  # 50 to 200
+            else:
+                # Relaxed: green shades
+                progress = (value - 0.6) / 0.4
+                red = int(100 - progress * 50)   # 100 to 50
+                green = int(150 + progress * 50) # 150 to 200
+                blue = int(200 - progress * 40)  # 200 to 160
+        
+        return QtGui.QColor(red, green, blue, 200)
+    
 class VideoPlayerWindow(QtWidgets.QMainWindow):
     session_stopped = QtCore.pyqtSignal()
     recalibration_requested = QtCore.pyqtSignal()

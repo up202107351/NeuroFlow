@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import hashlib
 import secrets
+import json
+import numpy as np
 
 DATABASE_DIR = Path('./app_data')
 DATABASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,15 +48,16 @@ def initialize_database():
         )
     ''')
 
-    # Session Metrics (Granular Data)
+    # Updated Session Metrics (Optimized storage)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_metrics (
             metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
-            timestamp TIMESTAMP NOT NULL,
-            prediction_label TEXT, -- 'Relaxed', 'Neutral', 'Focused', etc.
-            is_on_target BOOLEAN, -- True if meeting session goal (e.g., prediction == 'Relaxed')
-            raw_score REAL, -- Optional: if your classifier outputs a continuous score
+            predictions_data TEXT, -- JSON array of predictions
+            on_target_data TEXT, -- JSON array of is_on_target boolean values
+            timestamps_data TEXT, -- JSON array of timestamps
+            total_predictions INTEGER,
+            on_target_count INTEGER,
             FOREIGN KEY (session_id) REFERENCES sessions (session_id)
         )
     ''')
@@ -66,36 +69,39 @@ def initialize_database():
             session_id INTEGER UNIQUE NOT NULL, -- Ensures one summary per session
             time_on_target_seconds INTEGER,
             percent_on_target REAL,
-            average_raw_score REAL, -- If applicable
+            average_confidence REAL,
             FOREIGN KEY (session_id) REFERENCES sessions (session_id)
         )
     ''')
 
-    # Session Band Data (Alpha, Beta, Theta over time)
+    # Session Band Data (Optimized storage)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_band_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL,
-            timestamp REAL NOT NULL,
-            alpha REAL NOT NULL,
-            beta REAL NOT NULL,
-            theta REAL NOT NULL,
-            ab_ratio REAL NOT NULL,
-            bt_ratio REAL NOT NULL,
+            session_id INTEGER UNIQUE NOT NULL,
+            timestamps_data TEXT NOT NULL, -- JSON array
+            alpha_data TEXT NOT NULL, -- JSON array
+            beta_data TEXT NOT NULL, -- JSON array
+            theta_data TEXT NOT NULL, -- JSON array
+            ab_ratio_data TEXT NOT NULL, -- JSON array
+            bt_ratio_data TEXT NOT NULL, -- JSON array
+            sample_count INTEGER NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions (session_id)
         )
     ''')
     
-    # Session EEG Data (Raw EEG channels over time)
+    # Session EEG Data (Optimized storage)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_eeg_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL,
-            timestamp REAL NOT NULL,
-            channel_0 REAL NOT NULL,
-            channel_1 REAL NOT NULL,
-            channel_2 REAL NOT NULL,
-            channel_3 REAL NOT NULL,
+            session_id INTEGER UNIQUE NOT NULL,
+            timestamps_data TEXT NOT NULL, -- JSON array
+            channel_0_data TEXT NOT NULL, -- JSON array
+            channel_1_data TEXT NOT NULL, -- JSON array
+            channel_2_data TEXT NOT NULL, -- JSON array
+            channel_3_data TEXT NOT NULL, -- JSON array
+            sample_count INTEGER NOT NULL,
+            sampling_rate REAL,
             FOREIGN KEY (session_id) REFERENCES sessions (session_id)
         )
     ''')
@@ -104,15 +110,11 @@ def initialize_database():
     conn.close()
     print(f"Database initialized/checked at {DATABASE_NAME}")
 
-# --- User authentication functions ---
-
+# --- User authentication functions (unchanged) ---
 def hash_password(password, salt=None):
     """Hash password with salt using SHA-256"""
     if salt is None:
-        # Generate a new random salt
         salt = secrets.token_hex(16)
-    
-    # Create the hash
     pw_hash = hashlib.sha256((password + salt).encode()).hexdigest()
     return pw_hash, salt
 
@@ -121,17 +123,14 @@ def register_user(username, password):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Check if username already exists
     cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
     if cursor.fetchone():
         conn.close()
         return False, "Username already exists"
     
-    # Hash the password
     password_hash, salt = hash_password(password)
     created_at = datetime.now()
     
-    # Insert new user
     try:
         cursor.execute('''
             INSERT INTO users (username, password_hash, salt, created_at)
@@ -150,7 +149,6 @@ def authenticate_user(username, password):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Get user data
     cursor.execute('''
         SELECT user_id, password_hash, salt
         FROM users 
@@ -162,15 +160,11 @@ def authenticate_user(username, password):
         conn.close()
         return False, "User not found"
     
-    # Verify password
     stored_hash = user_data['password_hash']
     salt = user_data['salt']
-    
-    # Hash the provided password with the stored salt
     input_hash, _ = hash_password(password, salt)
     
     if input_hash == stored_hash:
-        # Update last login time
         user_id = user_data['user_id']
         cursor.execute('''
             UPDATE users 
@@ -190,7 +184,6 @@ def set_remember_token(user_id, remember=True):
     cursor = conn.cursor()
     
     if remember:
-        # Generate a unique token
         token = secrets.token_hex(32)
         cursor.execute('''
             UPDATE users 
@@ -198,7 +191,6 @@ def set_remember_token(user_id, remember=True):
             WHERE user_id = ?
         ''', (token, user_id))
     else:
-        # Clear the token
         cursor.execute('''
             UPDATE users 
             SET remember_token = NULL
@@ -235,13 +227,11 @@ def get_user_by_token(token):
             conn.close()
             return user_dict
         else:
-            # If no user found, let's check what tokens actually exist in the database
             cursor.execute('SELECT username, remember_token FROM users WHERE remember_token IS NOT NULL')
             existing_tokens = cursor.fetchall()
             if existing_tokens:
                 print(f"Found {len(existing_tokens)} users with tokens in database:")
                 for u in existing_tokens:
-                    # Show truncated tokens for comparison
                     print(f" - {u['username']}: {u['remember_token'][:10]}...")
             else:
                 print("No users with tokens found in database")
@@ -253,8 +243,7 @@ def get_user_by_token(token):
         conn.close()
         return None
 
-# --- Functions to interact with the database (updated with user_id) ---
-
+# --- Session Management Functions ---
 def start_new_session(user_id, session_type, target_metric_name=""):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -269,18 +258,111 @@ def start_new_session(user_id, session_type, target_metric_name=""):
     print(f"Started new session ID: {session_id} of type {session_type} for user {user_id}")
     return session_id, start_time
 
-def add_session_metric(session_id, prediction_label, is_on_target, raw_score=None):
+def save_session_metrics_batch(session_id, predictions, on_target_flags, timestamps):
+    """Save session metrics as optimized batch data"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    timestamp = datetime.now()
-    cursor.execute('''
-        INSERT INTO session_metrics (session_id, timestamp, prediction_label, is_on_target, raw_score)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (session_id, timestamp, prediction_label, is_on_target, raw_score))
-    conn.commit()
-    conn.close()
+    
+    try:
+        # Convert arrays to JSON strings for storage
+        predictions_json = json.dumps(predictions)
+        on_target_json = json.dumps(on_target_flags)
+        timestamps_json = json.dumps(timestamps)
+        
+        total_predictions = len(predictions)
+        on_target_count = sum(on_target_flags)
+        
+        # Insert or replace session metrics
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_metrics 
+            (session_id, predictions_data, on_target_data, timestamps_data, total_predictions, on_target_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (session_id, predictions_json, on_target_json, timestamps_json, total_predictions, on_target_count))
+        
+        conn.commit()
+        print(f"Saved {total_predictions} session metrics for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving session metrics: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_band_data_batch(session_id, band_data_dict):
+    """Save band power data as optimized batch"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Convert arrays to JSON strings
+        timestamps_json = json.dumps(band_data_dict["timestamps"])
+        alpha_json = json.dumps(band_data_dict["alpha"])
+        beta_json = json.dumps(band_data_dict["beta"])
+        theta_json = json.dumps(band_data_dict["theta"])
+        ab_ratio_json = json.dumps(band_data_dict["ab_ratio"])
+        bt_ratio_json = json.dumps(band_data_dict["bt_ratio"])
+        
+        sample_count = len(band_data_dict["timestamps"])
+        
+        # Insert or replace band data
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_band_data 
+            (session_id, timestamps_data, alpha_data, beta_data, theta_data, 
+             ab_ratio_data, bt_ratio_data, sample_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (session_id, timestamps_json, alpha_json, beta_json, theta_json,
+              ab_ratio_json, bt_ratio_json, sample_count))
+        
+        conn.commit()
+        print(f"Saved {sample_count} band data points for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving band data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_eeg_data_batch(session_id, eeg_data_dict, sampling_rate=256.0):
+    """Save EEG data as optimized batch"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Convert arrays to JSON strings
+        timestamps_json = json.dumps(eeg_data_dict["timestamps"])
+        channel_0_json = json.dumps(eeg_data_dict["channel_0"])
+        channel_1_json = json.dumps(eeg_data_dict["channel_1"])
+        channel_2_json = json.dumps(eeg_data_dict["channel_2"])
+        channel_3_json = json.dumps(eeg_data_dict["channel_3"])
+        
+        sample_count = len(eeg_data_dict["timestamps"])
+        
+        # Insert or replace EEG data
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_eeg_data 
+            (session_id, timestamps_data, channel_0_data, channel_1_data, 
+             channel_2_data, channel_3_data, sample_count, sampling_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (session_id, timestamps_json, channel_0_json, channel_1_json,
+              channel_2_json, channel_3_json, sample_count, sampling_rate))
+        
+        conn.commit()
+        print(f"Saved {sample_count} EEG data points for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving EEG data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 def end_session_and_summarize(session_id, end_time):
+    """End session and create summary from stored metrics"""
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -293,48 +375,56 @@ def end_session_and_summarize(session_id, end_time):
         return
 
     start_time_str = session_data['start_time']
-    # SQLite stores timestamps as text by default if not specified otherwise. Convert.
     start_time = datetime.fromisoformat(start_time_str)
     duration_seconds = int((end_time - start_time).total_seconds())
 
+    # Update session end time and duration
     cursor.execute('''
         UPDATE sessions
         SET end_time = ?, duration_seconds = ?
         WHERE session_id = ?
     ''', (end_time, duration_seconds, session_id))
 
-    # Calculate summary
+    # Get metrics data for summary
     cursor.execute('''
-        SELECT COUNT(*) as total_points, SUM(is_on_target) as on_target_points, AVG(raw_score) as avg_score
+        SELECT total_predictions, on_target_count, timestamps_data
         FROM session_metrics
         WHERE session_id = ?
     ''', (session_id,))
-    metrics_summary = cursor.fetchone()
+    metrics_data = cursor.fetchone()
 
     time_on_target_seconds = 0
     percent_on_target = 0.0
-    avg_raw_score = metrics_summary['avg_score'] if metrics_summary and metrics_summary['avg_score'] is not None else None
+    
+    if metrics_data and metrics_data['total_predictions'] > 0:
+        total_predictions = metrics_data['total_predictions']
+        on_target_count = metrics_data['on_target_count']
+        
+        # Calculate time on target (simplified - assumes 1 second per prediction)
+        time_on_target_seconds = on_target_count
+        percent_on_target = (on_target_count / total_predictions) * 100.0
+        
+        # Calculate average confidence from predictions
+        try:
+            timestamps_data = json.loads(metrics_data['timestamps_data'])
+            if len(timestamps_data) > 1:
+                session_duration = timestamps_data[-1] - timestamps_data[0]
+                time_on_target_seconds = int((on_target_count / total_predictions) * session_duration)
+        except:
+            pass
 
-    if metrics_summary and metrics_summary['total_points'] > 0:
-        # This is a simplified calculation. For accurate time_on_target_seconds,
-        # you'd need to sum durations between consecutive on_target points.
-        # For now, let's assume each metric point represents an equal time slice (e.g., 1 second).
-        # This needs to be refined based on how often you log metrics.
-        # A better way is to calculate it when logging by taking diff between timestamps.
-        # For simplicity here, using count of 'on_target' points * assumed_interval_per_point
-        assumed_interval_per_point = 1 # Placeholder - needs to match your metric logging frequency
-        time_on_target_seconds = metrics_summary['on_target_points'] * assumed_interval_per_point
-        percent_on_target = (metrics_summary['on_target_points'] / metrics_summary['total_points']) * 100.0
-
+    # Insert session summary
     cursor.execute('''
-        INSERT INTO session_summary (session_id, time_on_target_seconds, percent_on_target, average_raw_score)
+        INSERT OR REPLACE INTO session_summary 
+        (session_id, time_on_target_seconds, percent_on_target, average_confidence)
         VALUES (?, ?, ?, ?)
-    ''', (session_id, time_on_target_seconds, percent_on_target, avg_raw_score))
+    ''', (session_id, time_on_target_seconds, percent_on_target, 0.0))
 
     conn.commit()
     conn.close()
     print(f"Ended and summarized session ID: {session_id}")
 
+# --- Data Retrieval Functions ---
 def get_all_sessions_summary(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -342,144 +432,69 @@ def get_all_sessions_summary(user_id):
         SELECT s.session_id, s.session_type, s.start_time, s.duration_seconds,
                ss.percent_on_target, ss.time_on_target_seconds
         FROM sessions s
-        JOIN session_summary ss ON s.session_id = ss.session_id
+        LEFT JOIN session_summary ss ON s.session_id = ss.session_id
         WHERE s.user_id = ?
         ORDER BY s.start_time DESC
     ''', (user_id,))
-    sessions = cursor.fetchall() # Returns a list of sqlite3.Row objects
+    sessions = cursor.fetchall()
     conn.close()
     return sessions
 
-def get_session_details(session_id):
-    """ Fetches granular metrics for a specific session, e.g., for plotting. """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT timestamp, prediction_label, is_on_target, raw_score
-        FROM session_metrics
-        WHERE session_id = ?
-        ORDER BY timestamp ASC
-    ''', (session_id,))
-    details = cursor.fetchall()
-    conn.close()
-    return details
-
-def save_session_band_data(bands_dict):
-    """Save band power data for a session"""
-    session_id = bands_dict["session_id"]
-    
-    # Use proper database connection
+def get_session_metrics_data(session_id):
+    """Retrieve session metrics data"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # Insert data in chunks for efficiency
-        entries = []
-        for i in range(len(bands_dict["timestamps"])):
-            # Make sure we don't go out of bounds
-            if (i < len(bands_dict["alpha"]) and i < len(bands_dict["beta"]) and 
-                i < len(bands_dict["theta"]) and i < len(bands_dict["ab_ratio"]) and 
-                i < len(bands_dict["bt_ratio"])):
-                entries.append((
-                    session_id,
-                    bands_dict["timestamps"][i],
-                    bands_dict["alpha"][i],
-                    bands_dict["beta"][i],
-                    bands_dict["theta"][i],
-                    bands_dict["ab_ratio"][i],
-                    bands_dict["bt_ratio"][i]
-                ))
+        cursor.execute('''
+            SELECT predictions_data, on_target_data, timestamps_data
+            FROM session_metrics
+            WHERE session_id = ?
+        ''', (session_id,))
         
-        # Insert in a single transaction for speed
-        cursor.executemany('''
-        INSERT INTO session_band_data 
-        (session_id, timestamp, alpha, beta, theta, ab_ratio, bt_ratio)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', entries)
-        
-        conn.commit()
-        print(f"Saved {len(entries)} band data points for session {session_id}")
-        return True
-    except Exception as e:
-        print(f"Error saving band data: {e}")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-def save_session_eeg_data(session_id, eeg_data, timestamps):
-    """Save EEG data for a session"""
-    # Use proper database connection
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Insert data in chunks
-        entries = []
-        for i in range(min(len(timestamps), len(eeg_data))):
-            # Handle the nested structure of eeg_data
-            if isinstance(eeg_data[i], list) and len(eeg_data[i]) >= 4:
-                entries.append((
-                    session_id,
-                    timestamps[i],
-                    eeg_data[i][0],  # Channel 0
-                    eeg_data[i][1],  # Channel 1  
-                    eeg_data[i][2],  # Channel 2
-                    eeg_data[i][3]   # Channel 3
-                ))
+        result = cursor.fetchone()
+        if result:
+            predictions = json.loads(result['predictions_data'])
+            on_target = json.loads(result['on_target_data'])
+            timestamps = json.loads(result['timestamps_data'])
             
-            # Insert in batches to avoid memory issues with large datasets
-            if len(entries) >= 1000:
-                cursor.executemany('''
-                INSERT INTO session_eeg_data 
-                (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ''', entries)
-                entries = []
+            return {
+                'predictions': predictions,
+                'on_target': on_target,
+                'timestamps': timestamps
+            }
+        return None
         
-        # Insert any remaining entries
-        if entries:
-            cursor.executemany('''
-            INSERT INTO session_eeg_data 
-            (session_id, timestamp, channel_0, channel_1, channel_2, channel_3)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', entries)
-        
-        conn.commit()
-        print(f"Saved EEG data for session {session_id}")
-        return True
     except Exception as e:
-        print(f"Error saving EEG data: {e}")
-        conn.rollback()
-        return False
+        print(f"Error retrieving session metrics: {e}")
+        return None
     finally:
         conn.close()
 
 def get_session_band_data(session_id):
     """Retrieve band power data for a session"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         cursor.execute('''
-            SELECT timestamp, alpha, beta, theta, ab_ratio, bt_ratio
+            SELECT timestamps_data, alpha_data, beta_data, theta_data, 
+                   ab_ratio_data, bt_ratio_data
             FROM session_band_data 
             WHERE session_id = ?
-            ORDER BY timestamp
         ''', (session_id,))
         
-        results = cursor.fetchall()
-        
-        if results:
+        result = cursor.fetchone()
+        if result:
             data = {
-                'timestamps': [row['timestamp'] for row in results],
-                'alpha': [row['alpha'] for row in results],
-                'beta': [row['beta'] for row in results],
-                'theta': [row['theta'] for row in results],
-                'ab_ratio': [row['ab_ratio'] for row in results],
-                'bt_ratio': [row['bt_ratio'] for row in results]
+                'timestamps': json.loads(result['timestamps_data']),
+                'alpha': json.loads(result['alpha_data']),
+                'beta': json.loads(result['beta_data']),
+                'theta': json.loads(result['theta_data']),
+                'ab_ratio': json.loads(result['ab_ratio_data']),
+                'bt_ratio': json.loads(result['bt_ratio_data'])
             }
-            print(f"Retrieved {len(results)} band data points for session {session_id}")
+            print(f"Retrieved band data for session {session_id}: {len(data['timestamps'])} points")
             return data
         else:
             print(f"No band data found for session {session_id}")
@@ -489,33 +504,32 @@ def get_session_band_data(session_id):
         print(f"Error retrieving session band data: {e}")
         return None
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 def get_session_eeg_data(session_id):
     """Retrieve raw EEG data for a session"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         cursor.execute('''
-            SELECT timestamp, channel_0, channel_1, channel_2, channel_3
+            SELECT timestamps_data, channel_0_data, channel_1_data, 
+                   channel_2_data, channel_3_data, sampling_rate
             FROM session_eeg_data 
             WHERE session_id = ?
-            ORDER BY timestamp
         ''', (session_id,))
         
-        results = cursor.fetchall()
-        
-        if results:
+        result = cursor.fetchone()
+        if result:
             data = {
-                'timestamps': [row['timestamp'] for row in results],
-                'channel_0': [row['channel_0'] for row in results],
-                'channel_1': [row['channel_1'] for row in results],
-                'channel_2': [row['channel_2'] for row in results],
-                'channel_3': [row['channel_3'] for row in results]
+                'timestamps': json.loads(result['timestamps_data']),
+                'channel_0': json.loads(result['channel_0_data']),
+                'channel_1': json.loads(result['channel_1_data']),
+                'channel_2': json.loads(result['channel_2_data']),
+                'channel_3': json.loads(result['channel_3_data']),
+                'sampling_rate': result['sampling_rate']
             }
-            print(f"Retrieved {len(results)} EEG data points for session {session_id}")
+            print(f"Retrieved EEG data for session {session_id}: {len(data['timestamps'])} points")
             return data
         else:
             print(f"No EEG data found for session {session_id}")
@@ -525,8 +539,31 @@ def get_session_eeg_data(session_id):
         print(f"Error retrieving session EEG data: {e}")
         return None
     finally:
-        if conn:
-            conn.close()
+        conn.close()
+
+# --- Legacy Support Functions ---
+def add_session_metric(session_id, prediction_label, is_on_target, raw_score=None):
+    """Legacy function - now just logs the call"""
+    print(f"Legacy add_session_metric called for session {session_id}: {prediction_label}")
+
+def get_session_details(session_id):
+    """Legacy function - returns metrics data in old format"""
+    metrics_data = get_session_metrics_data(session_id)
+    if not metrics_data:
+        return []
+    
+    # Convert to legacy format
+    details = []
+    for i, prediction in enumerate(metrics_data['predictions']):
+        if i < len(metrics_data['on_target']) and i < len(metrics_data['timestamps']):
+            details.append({
+                'timestamp': metrics_data['timestamps'][i],
+                'prediction_label': prediction,
+                'is_on_target': metrics_data['on_target'][i],
+                'raw_score': None
+            })
+    
+    return details
 
 def add_session_note(session_id, note):
     """Add a note to a session"""
@@ -550,53 +587,6 @@ def add_session_note(session_id, note):
         if conn:
             conn.close()
 
-def log_session_event(session_id, event_type, prediction_label=None, value=None, level=None, is_on_target=False):
-    """
-    Log various session events, including EEG predictions and user interactions.
-    
-    Args:
-        session_id: The active session ID
-        event_type: Type of event (e.g., 'PREDICTION', 'USER_FEEDBACK', 'SCENE_CHANGE')
-        prediction_label: For EEG predictions, the mental state label
-        value: Normalized value (0.0-1.0) representing state intensity
-        level: Discrete level (-3 to +4) of the mental state
-        is_on_target: Whether this state meets the session's goal
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    timestamp = datetime.now()
-    
-    if event_type == 'PREDICTION':
-        # For predictions, use the existing session_metrics table
-        add_session_metric(session_id, prediction_label, is_on_target, raw_score=value)
-        return
-        
-    # For other event types, we could add a new events table
-    # This example uses the existing session_metrics table but marks
-    # the event type in the prediction_label field
-    cursor.execute('''
-        INSERT INTO session_metrics (session_id, timestamp, prediction_label, is_on_target, raw_score)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (session_id, timestamp, f"{event_type}:{prediction_label}", is_on_target, value))
-    
-    conn.commit()
-    conn.close()
-
-def get_all_sessions_summary_legacy():
-    """Legacy function for old DB schema without user_id"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT s.session_id, s.session_type, s.start_time, s.duration_seconds,
-               ss.percent_on_target, ss.time_on_target_seconds
-        FROM sessions s
-        JOIN session_summary ss ON s.session_id = ss.session_id
-        ORDER BY s.start_time DESC
-    ''')
-    sessions = cursor.fetchall() # Returns a list of sqlite3.Row objects
-    conn.close()
-    return sessions
-
 def end_session(session_id):
     """Simple wrapper to end a session without calculating summary."""
     end_time = datetime.now()
@@ -607,7 +597,6 @@ def ensure_remember_token_column_exists():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Check if the column exists
     cursor.execute("PRAGMA table_info(users)")
     columns = cursor.fetchall()
     column_names = [col['name'] for col in columns]
@@ -622,18 +611,155 @@ def ensure_remember_token_column_exists():
         
     conn.close()
 
-# Call initialize_database() once when your app starts or when this module is first imported.
+# Legacy functions for compatibility
+def get_all_sessions_summary_legacy():
+    """Legacy function for old DB schema without user_id"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT s.session_id, s.session_type, s.start_time, s.duration_seconds,
+               ss.percent_on_target, ss.time_on_target_seconds
+        FROM sessions s
+        LEFT JOIN session_summary ss ON s.session_id = ss.session_id
+        ORDER BY s.start_time DESC
+    ''')
+    sessions = cursor.fetchall()
+    conn.close()
+    return sessions
+
+def save_session_band_data(bands_dict):
+    """Legacy function - redirect to new batch function"""
+    session_id = bands_dict.get("session_id")
+    if not session_id:
+        print("Error: No session_id in bands_dict")
+        return False
+    
+    return save_session_band_data_batch(session_id, bands_dict)
+
+def save_session_eeg_data(session_id, eeg_data, timestamps):
+    """Legacy function - redirect to new batch function"""
+    if not eeg_data or not timestamps:
+        print("Error: No EEG data or timestamps provided")
+        return False
+    
+    # Convert old format to new format
+    eeg_data_dict = {
+        "timestamps": timestamps,
+        "channel_0": [sample[0] if len(sample) > 0 else 0 for sample in eeg_data],
+        "channel_1": [sample[1] if len(sample) > 1 else 0 for sample in eeg_data],
+        "channel_2": [sample[2] if len(sample) > 2 else 0 for sample in eeg_data],
+        "channel_3": [sample[3] if len(sample) > 3 else 0 for sample in eeg_data]
+    }
+    
+    return save_session_eeg_data_batch(session_id, eeg_data_dict)
+
+# Add these new functions to your existing database_manager.py
+
+def save_session_metrics_batch(session_id, predictions, on_target_flags, timestamps):
+    """Save session metrics as optimized batch data - NEW FUNCTION"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Convert arrays to JSON strings for storage
+        predictions_json = json.dumps(predictions)
+        on_target_json = json.dumps(on_target_flags)
+        timestamps_json = json.dumps(timestamps)
+        
+        total_predictions = len(predictions)
+        on_target_count = sum(on_target_flags)
+        
+        # Insert or replace session metrics
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_metrics 
+            (session_id, predictions_data, on_target_data, timestamps_data, total_predictions, on_target_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (session_id, predictions_json, on_target_json, timestamps_json, total_predictions, on_target_count))
+        
+        conn.commit()
+        print(f"Saved {total_predictions} session metrics for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving session metrics: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_band_data_batch(session_id, band_data_dict):
+    """Save band power data as optimized batch - NEW FUNCTION"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Convert arrays to JSON strings
+        timestamps_json = json.dumps(band_data_dict["timestamps"])
+        alpha_json = json.dumps(band_data_dict["alpha"])
+        beta_json = json.dumps(band_data_dict["beta"])
+        theta_json = json.dumps(band_data_dict["theta"])
+        ab_ratio_json = json.dumps(band_data_dict["ab_ratio"])
+        bt_ratio_json = json.dumps(band_data_dict["bt_ratio"])
+        
+        sample_count = len(band_data_dict["timestamps"])
+        
+        # Insert or replace band data
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_band_data 
+            (session_id, timestamps_data, alpha_data, beta_data, theta_data, 
+             ab_ratio_data, bt_ratio_data, sample_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (session_id, timestamps_json, alpha_json, beta_json, theta_json,
+              ab_ratio_json, bt_ratio_json, sample_count))
+        
+        conn.commit()
+        print(f"Saved {sample_count} band data points for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving band data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def save_session_eeg_data_batch(session_id, eeg_data_dict, sampling_rate=256.0):
+    """Save EEG data as optimized batch - NEW FUNCTION"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Convert arrays to JSON strings
+        timestamps_json = json.dumps(eeg_data_dict["timestamps"])
+        channel_0_json = json.dumps(eeg_data_dict["channel_0"])
+        channel_1_json = json.dumps(eeg_data_dict["channel_1"])
+        channel_2_json = json.dumps(eeg_data_dict["channel_2"])
+        channel_3_json = json.dumps(eeg_data_dict["channel_3"])
+        
+        sample_count = len(eeg_data_dict["timestamps"])
+        
+        # Insert or replace EEG data
+        cursor.execute('''
+            INSERT OR REPLACE INTO session_eeg_data 
+            (session_id, timestamps_data, channel_0_data, channel_1_data, 
+             channel_2_data, channel_3_data, sample_count, sampling_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (session_id, timestamps_json, channel_0_json, channel_1_json,
+              channel_2_json, channel_3_json, sample_count, sampling_rate))
+        
+        conn.commit()
+        print(f"Saved {sample_count} EEG data points for session {session_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving EEG data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+# Initialize database when module is imported
 if __name__ == "__main__":
     initialize_database()
-    # Example usage (for testing this module standalone)
-    # sid, st = start_new_session("Meditation-Video", "Relaxation")
-    # add_session_metric(sid, "Relaxed", True, 0.8)
-    # time.sleep(1)
-    # add_session_metric(sid, "Neutral", False, 0.5)
-    # time.sleep(1)
-    # add_session_metric(sid, "Relaxed", True, 0.9)
-    # end_session_and_summarize(sid, datetime.now())
-    # print(get_all_sessions_summary())
 else:
-    # Ensures DB is ready when imported by the main app
     initialize_database()
