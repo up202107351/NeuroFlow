@@ -822,6 +822,7 @@ class EEGProcessingWorker(QtCore.QObject):
         
         # Store EEG data (downsampled for storage efficiency)
         if eeg_window.shape[1] >= self.nfft:
+            eeg_window = self._filter_eeg_data(eeg_window)
             # Downsample by taking every 4th sample for storage
             downsample_factor = 4
             downsampled_indices = np.arange(0, eeg_window.shape[1], downsample_factor)
