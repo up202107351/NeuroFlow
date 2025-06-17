@@ -6,8 +6,6 @@ import qtmodern.windows
 import matplotlib
 matplotlib.use('Qt5Agg') # Important: Use Qt5 backend for Matplotlib
 from ui.home_page_widget import HomePageWidget
-from ui.meditation_page_widget import MeditationPageWidget
-from ui.focus_page_widget import FocusPageWidget
 from ui.history_page_widget import HistoryPageWidget
 from ui.unified_page_widget import UnifiedEEGPageWidget
 from ui.login_widget import LoginWidget

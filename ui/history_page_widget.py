@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import seaborn as sns
 import matplotlib.dates as mdates
 from matplotlib.gridspec import GridSpec
+import json
 
 # Import your database manager
 from backend import database_manager as db
@@ -585,227 +586,196 @@ class HistoryPageWidget(QtWidgets.QWidget):
         self.graph_tabs.setCurrentIndex(0)
         
     def generate_session_graph(self, session_id):
-        """Generate graph for session metrics with a beautiful Seaborn style"""
-        # Get detailed metrics for this session
+        """Generate clean 4-channel EEG data visualization"""
         try:
-            session_details = db.get_session_details(session_id)
+            # Get EEG data from new batch format
+            eeg_data = db.get_session_eeg_data(session_id)
             
-            if not session_details:
-                # No detailed data available
+            if not eeg_data:
+                # No EEG data available
                 self.figure.clear()
                 ax = self.figure.add_subplot(111)
-                ax.text(0.5, 0.5, "No detailed data available for this session", 
+                ax.text(0.5, 0.5, "No EEG data available for this session", 
                         horizontalalignment='center', verticalalignment='center',
                         transform=ax.transAxes, fontsize=12, color='#888')
                 ax.set_axis_off()
                 self.canvas.draw()
                 return
                 
-            # Convert to pandas DataFrame for easier manipulation
-            data = []
-            for detail in session_details:
-                timestamp = datetime.fromisoformat(detail['timestamp'])
-                
-                # Safely access is_on_target - sqlite3.Row doesn't have .get()
-                try:
-                    is_on_target = bool(detail['is_on_target'])
-                except (TypeError, KeyError, IndexError):
-                    is_on_target = False
-                    
-                # Safely access raw_score
-                try:
-                    raw_score = detail['raw_score']
-                    if raw_score is None:
-                        raw_score = 0.5
-                except (TypeError, KeyError, IndexError):
-                    raw_score = 0.5
-                
-                data.append({
-                    'timestamp': timestamp,
-                    'is_on_target': is_on_target,
-                    'raw_score': raw_score
-                })
-                
-            df = pd.DataFrame(data)
+            # Extract EEG data
+            timestamps = eeg_data['timestamps']
+            channel_data = [
+                eeg_data['channel_0'],  # TP9
+                eeg_data['channel_1'],  # AF7  
+                eeg_data['channel_2'],  # AF8
+                eeg_data['channel_3']   # TP10
+            ]
+            sampling_rate = eeg_data.get('sampling_rate', 256.0)
             
-            # Plot the data with Seaborn styling
+            if not timestamps or len(timestamps) == 0:
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                ax.text(0.5, 0.5, "No EEG data points found", 
+                        horizontalalignment='center', verticalalignment='center',
+                        transform=ax.transAxes, fontsize=12, color='#888')
+                ax.set_axis_off()
+                self.canvas.draw()
+                return
+            
+            # Convert timestamps to seconds elapsed
+            start_time = timestamps[0]
+            time_seconds = [(ts - start_time) for ts in timestamps]
+            
+            # Create the plot
             self.figure.clear()
-            
-            # Set up the figure with a dark background
             plt.style.use('dark_background')
             self.figure.patch.set_facecolor('#2d2d2d')
             
-            # Create two subplot areas for different visualizations
-            gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.3)
+            # Channel names and colors
+            channel_names = ['TP9', 'AF7', 'AF8', 'TP10']
+            channel_colors = [NEUROFLOW_COLORS[0], NEUROFLOW_COLORS[1], 
+                            NEUROFLOW_COLORS[2], NEUROFLOW_COLORS[3]]
             
-            # Top subplot for the main line chart
-            ax1 = self.figure.add_subplot(gs[0])
+            # Create 4 subplots with manual positioning to avoid tight_layout issues
+            fig = self.figure
             
-            # Bottom subplot for a heatmap-style visualization
-            ax2 = self.figure.add_subplot(gs[1])
+            # Manual subplot positioning [left, bottom, width, height]
+            subplot_height = 0.18  # Height of each subplot
+            subplot_width = 0.75   # Width of subplots
+            left_margin = 0.15     # Space for y-labels
+            bottom_start = 0.08    # Bottom margin
+            vertical_spacing = 0.02  # Space between subplots
             
-            # Calculate minutes elapsed for each point
-            if len(df) > 0:
-                start_time = df['timestamp'].min()
-                df['minutes_elapsed'] = df['timestamp'].apply(lambda x: (x - start_time).total_seconds() / 60)
+            axes = []
+            for i in range(4):
+                # Calculate position (bottom subplot first, then stack upward)
+                bottom = bottom_start + i * (subplot_height + vertical_spacing)
+                ax = fig.add_axes([left_margin, bottom, subplot_width, subplot_height])
+                axes.append(ax)
                 
-                # Smooth the data slightly for a more polished look
-                window_size = 5
-                if len(df) > window_size:
-                    df['smoothed_score'] = df['raw_score'].rolling(window=window_size, center=True).mean()
-                    df['smoothed_score'].fillna(df['raw_score'], inplace=True)
+                # Plot the channel data
+                ax.plot(time_seconds, channel_data[3-i], color=channel_colors[3-i], 
+                    linewidth=0.8, alpha=0.9)
+                
+                # Style each subplot
+                ax.set_ylabel(f'{channel_names[3-i]}\n(μV)', color='#ccc', fontsize=10, 
+                            rotation=0, ha='right', va='center')
+                ax.tick_params(colors='#ccc', labelsize=8)
+                ax.grid(True, linestyle='--', alpha=0.2, color='#555')
+                
+                # Set background
+                ax.set_facecolor('#2d2d2d')
+                for spine in ax.spines.values():
+                    spine.set_color('#555')
+                
+                # Only show x-axis label on bottom subplot
+                if i == 0:  # Bottom subplot
+                    ax.set_xlabel('Time (seconds)', color='#ccc', fontsize=10)
                 else:
-                    df['smoothed_score'] = df['raw_score']
-                
-                # Main line plot with area fill
-                sns.lineplot(x='minutes_elapsed', y='smoothed_score', data=df, ax=ax1, 
-                            color=NEUROFLOW_COLORS[0], linewidth=2.5)
-                
-                # Add shaded area under the curve
-                ax1.fill_between(df['minutes_elapsed'], 0, df['smoothed_score'], 
-                                color=NEUROFLOW_COLORS[0], alpha=0.3)
-                
-                # Add markers for "on target" points
-                on_target_df = df[df['is_on_target']]
-                if not on_target_df.empty:
-                    ax1.scatter(on_target_df['minutes_elapsed'], on_target_df['smoothed_score'], 
-                               color=NEUROFLOW_COLORS[2], s=50, zorder=3, 
-                               label='On Target', alpha=0.7)
-                
-                # Style the main plot
-                ax1.set_xlabel('Minutes', color='#ccc')
-                ax1.set_ylabel('State Intensity', color='#ccc')
-                ax1.set_ylim(0, 1)
-                ax1.set_xlim(0, df['minutes_elapsed'].max() * 1.05)
-                ax1.grid(True, linestyle='--', alpha=0.3, color='#555')
-                
-                # Session type for title
-                session_type = "Meditation" if "Meditation" in self.session_type_label.text() else "Focus"
-                ax1.set_title(f"{session_type} Session Progress", fontsize=14, color='#ccc')
-                
-                # Add legend if we have on-target points
-                if not on_target_df.empty:
-                    ax1.legend(facecolor='#333', edgecolor='#555', labelcolor='#ccc')
-                
-                # Create a heatmap-style visualization in the bottom subplot
-                # This represents intensity over time with a colorful bar
-                cmap = plt.cm.get_cmap('viridis')
-                
-                # Normalize values for the colormap
-                norm = plt.Normalize(0, 1)
-                
-                # Create color blocks
-                for i in range(len(df) - 1):
-                    x_start = df.iloc[i]['minutes_elapsed']
-                    x_end = df.iloc[i+1]['minutes_elapsed']
-                    color = cmap(norm(df.iloc[i]['smoothed_score']))
-                    ax2.fill_between([x_start, x_end], 0, 1, color=color)
-                
-                # Add a colorbar
-                sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-                sm.set_array([])
-                cbar = self.figure.colorbar(sm, ax=ax2, orientation='horizontal', pad=0.1)
-                cbar.set_label('State Intensity', color='#ccc')
-                cbar.ax.tick_params(colors='#ccc')
-                
-                # Style the heatmap subplot
-                ax2.set_ylabel('Activity', color='#ccc')
-                ax2.set_xlabel('Minutes', color='#ccc')
-                ax2.set_yticks([])
-                ax2.set_xlim(ax1.get_xlim())
-                
-                # Add annotations for key moments
-                peak_idx = df['smoothed_score'].idxmax()
-                peak_time = df.iloc[peak_idx]['minutes_elapsed']
-                peak_value = df.iloc[peak_idx]['smoothed_score']
-                
-                # Only annotate if there's a significant peak
-                if peak_value > 0.6:
-                    ax1.annotate(f'Peak: {peak_value:.2f}', 
-                                xy=(peak_time, peak_value),
-                                xytext=(peak_time, peak_value + 0.15),
-                                color='#fff',
-                                arrowprops=dict(facecolor=NEUROFLOW_COLORS[3], shrink=0.05, width=1.5))
-                
-            else:
-                ax1.text(0.5, 0.5, "No data points recorded for this session", 
-                        horizontalalignment='center', verticalalignment='center',
-                        transform=ax1.transAxes, fontsize=12, color='#888')
-                ax1.set_axis_off()
-                ax2.set_axis_off()
+                    ax.tick_params(labelbottom=False)
+                    
+                # Share x-axis with bottom subplot for consistent scaling
+                if i > 0:
+                    ax.sharex(axes[0])
             
-            self.figure.tight_layout()
+            # Add title manually positioned
+            fig.text(0.5, 0.95, f'Session Raw EEG Data', 
+                    ha='center', va='top', color='#ccc', fontsize=12, weight='bold')
+            
             self.canvas.draw()
             
         except Exception as e:
-            print(f"Error generating session graph: {e}")
+            print(f"Error generating EEG graph: {e}")
+            import traceback
+            traceback.print_exc()
             self.figure.clear()
             ax = self.figure.add_subplot(111)
-            ax.text(0.5, 0.5, f"Error loading session data: {str(e)}", 
+            ax.text(0.5, 0.5, f"Error loading EEG data: {str(e)}", 
                     horizontalalignment='center', verticalalignment='center',
                     transform=ax.transAxes, fontsize=10, color='#e74c3c')
             ax.set_axis_off()
             self.canvas.draw()
-            
+    
     def generate_brainwave_graph(self, session_id):
-        """Generate brain wave activity visualization"""
+        """Generate brain wave activity visualization using real data"""
         self.brainwave_figure.clear()
         ax = self.brainwave_figure.add_subplot(111)
         
         try:
-            # For now, just display a placeholder graph
-            # In a real implementation, you'd get real brainwave data
+            # Get band power data from new batch format
+            band_data = db.get_session_band_data(session_id)
             
-            # Create simulated brainwave data (this would come from your database)
-            x = np.linspace(0, 10, 100)
+            if not band_data:
+                ax.text(0.5, 0.5, "No brainwave data available for this session", 
+                        horizontalalignment='center', verticalalignment='center',
+                        transform=ax.transAxes, fontsize=12, color='#888')
+                ax.set_axis_off()
+                self.brainwave_canvas.draw()
+                return
             
-            # Simulate different wave types
-            alpha = 0.4 * np.sin(2 * np.pi * 1.0 * x) + 0.5  # Alpha waves (8-13 Hz)
-            beta = 0.2 * np.sin(2 * np.pi * 2.0 * x) + 0.6   # Beta waves (13-30 Hz)
-            theta = 0.3 * np.sin(2 * np.pi * 0.5 * x) + 0.4  # Theta waves (4-8 Hz)
-            delta = 0.15 * np.sin(2 * np.pi * 0.2 * x) + 0.3 # Delta waves (0.5-4 Hz)
+            # Extract data
+            timestamps = band_data['timestamps']
+            alpha_data = band_data['alpha']
+            beta_data = band_data['beta']
+            theta_data = band_data['theta']
             
-            # Plot with the NeuroFlow colors
-            ax.plot(x, alpha, color=NEUROFLOW_COLORS[0], linewidth=2, label='Alpha')
-            ax.plot(x, beta, color=NEUROFLOW_COLORS[1], linewidth=2, label='Beta')
-            ax.plot(x, theta, color=NEUROFLOW_COLORS[2], linewidth=2, label='Theta')
-            ax.plot(x, delta, color=NEUROFLOW_COLORS[3], linewidth=2, label='Delta')
+            if not timestamps or len(timestamps) == 0:
+                ax.text(0.5, 0.5, "No brainwave data points found", 
+                        horizontalalignment='center', verticalalignment='center',
+                        transform=ax.transAxes, fontsize=12, color='#888')
+                ax.set_axis_off()
+                self.brainwave_canvas.draw()
+                return
+            
+            # Convert timestamps to minutes elapsed
+            start_time = timestamps[0]
+            minutes_elapsed = [(ts - start_time) / 60 for ts in timestamps]
+            
+            # Plot actual brainwave data
+            ax.plot(minutes_elapsed, alpha_data, color=NEUROFLOW_COLORS[0], 
+                linewidth=2, label='Alpha (8-13 Hz) - Relaxation')
+            ax.plot(minutes_elapsed, beta_data, color=NEUROFLOW_COLORS[1], 
+                linewidth=2, label='Beta (13-30 Hz) - Focus')
+            ax.plot(minutes_elapsed, theta_data, color=NEUROFLOW_COLORS[2], 
+                linewidth=2, label='Theta (4-8 Hz) - Deep State')
             
             # Style the plot
             ax.set_facecolor('#2d2d2d')
-            ax.set_xlabel('Time (s)', color='#ccc')
-            ax.set_ylabel('Amplitude (μV)', color='#ccc')
-            ax.set_title('Brainwave Activity', color='#ccc')
+            ax.set_xlabel('Time (minutes)', color='#ccc')
+            ax.set_ylabel('Power (μV²)', color='#ccc')
+            ax.set_title('Brainwave Band Powers Over Time', color='#ccc')
             ax.tick_params(colors='#ccc')
             ax.grid(True, linestyle='--', alpha=0.3, color='#555')
             
             # Add legend
             ax.legend(facecolor='#333', edgecolor='#555', labelcolor='#ccc')
             
-            # Add informational text about brain waves
-            info_text = (
-                "Alpha (8-13 Hz): Relaxation, calmness\n"
-                "Beta (13-30 Hz): Alert, focused thinking\n"
-                "Theta (4-8 Hz): Deep meditation, creativity\n"
-                "Delta (0.5-4 Hz): Deep sleep, healing"
-            )
-            ax.text(0.98, 0.02, info_text, 
-                    horizontalalignment='right', verticalalignment='bottom',
-                    transform=ax.transAxes, fontsize=8, color='#aaa',
-                    bbox=dict(facecolor='#333', alpha=0.5, boxstyle='round'))
+            # Add average values as text
+            avg_alpha = np.mean(alpha_data) if alpha_data else 0
+            avg_beta = np.mean(beta_data) if beta_data else 0
+            avg_theta = np.mean(theta_data) if theta_data else 0
             
-            # Note this is simulated data
-            ax.text(0.5, 0.02, 'Visualization based on simulated data', 
-                    horizontalalignment='center', verticalalignment='bottom',
-                    transform=ax.transAxes, fontsize=8, color='#888')
+            stats_text = (
+                f"Session Averages:\n"
+                f"Alpha: {avg_alpha:.2f} μV²\n"
+                f"Beta: {avg_beta:.2f} μV²\n"
+                f"Theta: {avg_theta:.2f} μV²"
+            )
+            
+            ax.text(0.98, 0.02, stats_text, 
+                    horizontalalignment='right', verticalalignment='bottom',
+                    transform=ax.transAxes, fontsize=9, color='#ccc',
+                    bbox=dict(facecolor='#333', alpha=0.8, boxstyle='round'))
                     
             self.brainwave_figure.tight_layout()
             self.brainwave_canvas.draw()
             
         except Exception as e:
             print(f"Error generating brainwave graph: {e}")
-            ax.text(0.5, 0.5, "Brainwave visualization not available", 
+            import traceback
+            traceback.print_exc()
+            ax.text(0.5, 0.5, f"Error loading brainwave data: {str(e)}", 
                     horizontalalignment='center', verticalalignment='center',
-                    transform=ax.transAxes, fontsize=12, color='#888')
+                    transform=ax.transAxes, fontsize=12, color='#e74c3c')
             ax.set_axis_off()
-            self.brainwave_canvas.draw() 
+            self.brainwave_canvas.draw()
