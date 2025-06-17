@@ -218,7 +218,7 @@ class HistoryPageWidget(QtWidgets.QWidget):
         brainwave_layout.addWidget(self.brainwave_canvas)
         
         # Add tabs
-        self.graph_tabs.addTab(progress_tab, "Session Progress")
+        self.graph_tabs.addTab(progress_tab, "EEG Data")
         self.graph_tabs.addTab(brainwave_tab, "Brain Waves")
         
         details_layout.addWidget(self.graph_tabs)
@@ -679,7 +679,7 @@ class HistoryPageWidget(QtWidgets.QWidget):
                     ax.sharex(axes[0])
             
             # Add title manually positioned
-            fig.text(0.5, 0.95, f'Session Raw EEG Data', 
+            fig.text(0.5, 0.95, f'Session EEG Data', 
                     ha='center', va='top', color='#ccc', fontsize=12, weight='bold')
             
             self.canvas.draw()

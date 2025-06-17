@@ -157,10 +157,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.btn_start_unity_game.clicked.connect(lambda: self.start_session("unity"))
         game_teaser_layout.addWidget(self.btn_start_unity_game)
 
-        self.latency_test_button = QtWidgets.QPushButton("Test EEG Processing")
-        self.latency_test_button.clicked.connect(self.test_eeg_processing)
-        game_teaser_layout.addWidget(self.latency_test_button)
-
         teasers_layout.addLayout(game_teaser_layout)
         self.main_layout.addLayout(teasers_layout)
 
@@ -1118,14 +1114,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         if self.eeg_worker:
             QtCore.QMetaObject.invokeMethod(self.eeg_worker, "recalibrate", QtCore.Qt.QueuedConnection)
 
-    def test_eeg_processing(self):
-        """Test EEG processing system"""
-        if not self._setup_eeg_worker():
-            QtWidgets.QMessageBox.critical(self, "EEG Setup Error", "Failed to initialize EEG processing system.")
-            return
-        
-        QtCore.QMetaObject.invokeMethod(self.eeg_worker, "connect_to_lsl", QtCore.Qt.QueuedConnection)
-        QtWidgets.QMessageBox.information(self, "EEG Test", "Testing EEG connection. Check console for status updates.")
 
     def clean_up_session(self):
         """Clean up any active sessions when widget is closed or app exits"""
