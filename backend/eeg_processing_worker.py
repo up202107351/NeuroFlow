@@ -2,7 +2,7 @@
 """
 EEG Processing Worker - Qt Threading-based EEG Processing
 
-Updated to handle all session data accumulation and save directly to database.
+Updated to handle both single-stream (BlueMuse) and multi-stream (LSL simulator) scenarios.
 """
 
 import time
@@ -31,11 +31,15 @@ except ImportError:
 
 # --- Configuration ---
 LSL_STREAM_TYPE = 'EEG'
+LSL_ACCELEROMETER_STREAM_TYPE = 'Accelerometer'
 LSL_RESOLVE_TIMEOUT = 5
 LSL_CHUNK_MAX_PULL = 128
 
 EEG_CHANNEL_INDICES = [0, 1, 2, 3]  # TP9, AF7, AF8, TP10 for Muse
 NUM_EEG_CHANNELS = len(EEG_CHANNEL_INDICES)
+
+# Accelerometer channel indices for single-stream setup (BlueMuse)
+ACC_CHANNEL_INDICES_SINGLE_STREAM = [9, 10, 11]
 
 CALIBRATION_DURATION_SECONDS = 20.0
 ANALYSIS_WINDOW_SECONDS = 1.0
@@ -60,9 +64,10 @@ class EEGProcessingWorker(QtCore.QObject):
     """
     EEG Processing Worker that runs in a separate thread.
     Handles all EEG processing, data accumulation, and database saving.
+    Now supports both single-stream and multi-stream LSL setups.
     """
     
-    # Signals for UI communication (reduced - no session_data_ready needed)
+    # Signals for UI communication
     connection_status_changed = QtCore.pyqtSignal(str, str)  # status, message
     calibration_progress = QtCore.pyqtSignal(float)  # 0.0 to 1.0
     calibration_status_changed = QtCore.pyqtSignal(str, dict)  # status, data
@@ -76,6 +81,8 @@ class EEGProcessingWorker(QtCore.QObject):
         
         # Connection state
         self.lsl_inlet = None
+        self.lsl_accelerometer_inlet = None  # NEW: Separate accelerometer inlet
+        self.is_multi_stream = False  # NEW: Track if we're using multi-stream setup
         self.sampling_rate = DEFAULT_SAMPLING_RATE
         self.running = True
         
@@ -83,7 +90,7 @@ class EEGProcessingWorker(QtCore.QObject):
         self.is_calibrated = False
         self.is_calibrating = False
         self.current_session_type = None
-        self.current_session_id = None  # Store session ID directly
+        self.current_session_id = None
         self.session_start_time = None
         
         # EEG processing state
@@ -109,7 +116,7 @@ class EEGProcessingWorker(QtCore.QObject):
         self.processing_timer = QtCore.QTimer()
         self.processing_timer.timeout.connect(self._process_eeg_data)
         
-        # SESSION DATA ACCUMULATION - ALL IN WORKER NOW
+        # SESSION DATA ACCUMULATION
         self.session_predictions = []
         self.session_on_target = []
         self.session_timestamps = []
@@ -178,21 +185,22 @@ class EEGProcessingWorker(QtCore.QObject):
         
     @QtCore.pyqtSlot()
     def connect_to_lsl(self):
-        """Connect to the LSL stream"""
-        logger.info(f"Looking for LSL stream (Type: '{LSL_STREAM_TYPE}')...")
+        """Connect to the LSL stream(s) - Updated to handle multi-stream"""
+        logger.info("Looking for LSL streams...")
         
         try:
             self.connection_status_changed.emit("CONNECTING", "Looking for EEG stream...")
             
-            streams = pylsl.resolve_byprop('type', LSL_STREAM_TYPE, 1, timeout=LSL_RESOLVE_TIMEOUT)
-            if not streams:
-                error_msg = "LSL stream not found."
+            # First, try to find EEG stream
+            eeg_streams = pylsl.resolve_byprop('type', LSL_STREAM_TYPE, 1, timeout=LSL_RESOLVE_TIMEOUT)
+            if not eeg_streams:
+                error_msg = "EEG LSL stream not found."
                 logger.error(error_msg)
                 self.connection_status_changed.emit("ERROR", error_msg)
                 self.error_occurred.emit(error_msg)
                 return False
                 
-            self.lsl_inlet = pylsl.StreamInlet(streams[0], max_chunklen=LSL_CHUNK_MAX_PULL)
+            self.lsl_inlet = pylsl.StreamInlet(eeg_streams[0], max_chunklen=LSL_CHUNK_MAX_PULL)
             info = self.lsl_inlet.info()
             lsl_sr = info.nominal_srate()
             self.sampling_rate = lsl_sr if lsl_sr > 0 else DEFAULT_SAMPLING_RATE
@@ -201,12 +209,30 @@ class EEGProcessingWorker(QtCore.QObject):
             self._update_filter_coefficients()
             
             device_name = info.name()
-            logger.info(f"Connected to '{device_name}' @ {self.sampling_rate:.2f} Hz")
+            logger.info(f"Connected to EEG stream '{device_name}' @ {self.sampling_rate:.2f} Hz")
+            
+            # Check if EEG stream has accelerometer data (single-stream setup)
+            if info.channel_count() > max(ACC_CHANNEL_INDICES_SINGLE_STREAM):
+                logger.info("Single-stream setup detected (EEG stream includes accelerometer data)")
+                self.is_multi_stream = False
+            else:
+                logger.info("Multi-stream setup detected, looking for separate accelerometer stream...")
+                self.is_multi_stream = True
+                
+                # Try to find separate accelerometer stream
+                acc_streams = pylsl.resolve_byprop('type', LSL_ACCELEROMETER_STREAM_TYPE, 1, timeout=2.0)
+                if acc_streams:
+                    self.lsl_accelerometer_inlet = pylsl.StreamInlet(acc_streams[0], max_chunklen=LSL_CHUNK_MAX_PULL)
+                    acc_info = self.lsl_accelerometer_inlet.info()
+                    logger.info(f"Connected to accelerometer stream '{acc_info.name()}' @ {acc_info.nominal_srate():.2f} Hz")
+                else:
+                    logger.warning("No accelerometer stream found - signal quality assessment will be limited")
             
             self.connection_status_changed.emit("CONNECTED", f"Connected to {device_name}")
             
+            # Verify EEG stream has sufficient channels
             if info.channel_count() < np.max(EEG_CHANNEL_INDICES) + 1:
-                error_msg = f"LSL stream has insufficient channels. Need at least {np.max(EEG_CHANNEL_INDICES) + 1}, got {info.channel_count()}"
+                error_msg = f"EEG stream has insufficient channels. Need at least {np.max(EEG_CHANNEL_INDICES) + 1}, got {info.channel_count()}"
                 logger.error(error_msg)
                 self.connection_status_changed.emit("ERROR", error_msg)
                 self.error_occurred.emit(error_msg)
@@ -220,6 +246,33 @@ class EEGProcessingWorker(QtCore.QObject):
             self.connection_status_changed.emit("ERROR", error_msg)
             self.error_occurred.emit(error_msg)
             return False
+    
+    def _get_accelerometer_data(self):
+        """Get accelerometer data from appropriate source"""
+        if self.is_multi_stream and self.lsl_accelerometer_inlet:
+            # Multi-stream: get from separate accelerometer stream
+            try:
+                acc_chunk, acc_timestamps = self.lsl_accelerometer_inlet.pull_chunk(timeout=0.1, max_samples=10)
+                if acc_chunk:
+                    acc_chunk_np = np.array(acc_chunk, dtype=np.float64).T
+                    if acc_chunk_np.shape[1] > 0:
+                        return acc_chunk_np[:, -1]  # Return latest sample
+            except Exception as e:
+                # Non-critical error - accelerometer data is optional
+                pass
+        return None
+    
+    def _extract_accelerometer_from_eeg_chunk(self, chunk_np):
+        """Extract accelerometer data from EEG chunk (single-stream setup)"""
+        if not self.is_multi_stream and chunk_np.shape[0] > max(ACC_CHANNEL_INDICES_SINGLE_STREAM):
+            try:
+                acc_chunk = chunk_np[ACC_CHANNEL_INDICES_SINGLE_STREAM, :]
+                if acc_chunk.shape[1] > 0:
+                    return acc_chunk[:, -1]  # Return latest sample
+            except Exception as e:
+                # Non-critical error
+                pass
+        return None
     
     def _update_filter_coefficients(self):
         """Update filter coefficients based on current sampling rate"""
@@ -246,7 +299,7 @@ class EEGProcessingWorker(QtCore.QObject):
         self.is_calibrating = False
         self.running = True
         self.current_session_type = session_type
-        self.current_session_id = session_id  # Store session ID
+        self.current_session_id = session_id
         self.session_start_time = None
         self.recent_metrics_history = []
         self.previous_states = []
@@ -401,7 +454,7 @@ class EEGProcessingWorker(QtCore.QObject):
         QtCore.QTimer.singleShot(100, self._start_calibration)   
     
     def _perform_calibration(self):
-        """Perform calibration with signal quality monitoring"""
+        """Perform calibration with signal quality monitoring - Updated for multi-stream"""
         print(f"EEG Worker: _perform_calibration starting - running: {self.running}, is_calibrating: {self.is_calibrating}")
     
         if not self.running:
@@ -434,7 +487,7 @@ class EEGProcessingWorker(QtCore.QObject):
             current_time = time.time()
             elapsed_time = current_time - calibration_start_time
                       
-            # Get data chunk
+            # Get EEG data chunk
             try:
                 chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
                 total_chunks_received += 1
@@ -454,11 +507,11 @@ class EEGProcessingWorker(QtCore.QObject):
                 time.sleep(0.01)
                 continue
                 
-            # Process chunk
+            # Process EEG chunk
             chunk_np = np.array(chunk, dtype=np.float64).T
             total_samples_received += chunk_np.shape[1]
             
-            # Check if we have enough channels
+            # Check if we have enough channels for EEG
             if chunk_np.shape[0] <= max(EEG_CHANNEL_INDICES):
                 print(f"EEG Worker: Not enough channels in chunk: {chunk_np.shape[0]} <= {max(EEG_CHANNEL_INDICES)}")
                 chunks_failed_processing += 1
@@ -466,18 +519,20 @@ class EEGProcessingWorker(QtCore.QObject):
                 
             eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
             
-            # Extract accelerometer data if available
-            ACC_CHANNEL_INDICES = [9, 10, 11]
-            if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
-                try:
-                    acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]
-                    if acc_chunk.shape[1] > 0:
-                        latest_acc_sample = acc_chunk[:, -1]
-                        self.signal_quality_validator.add_accelerometer_data(latest_acc_sample)
-                except Exception as e:
-                    print(f"EEG Worker: Could not extract accelerometer data: {e}")
+            # Get accelerometer data from appropriate source
+            acc_sample = None
+            if self.is_multi_stream:
+                # Multi-stream: get from separate accelerometer stream
+                acc_sample = self._get_accelerometer_data()
+            else:
+                # Single-stream: extract from EEG chunk
+                acc_sample = self._extract_accelerometer_from_eeg_chunk(chunk_np)
             
-            # Add to buffer
+            # Add accelerometer data to signal quality validator if available
+            if acc_sample is not None:
+                self.signal_quality_validator.add_accelerometer_data(acc_sample)
+            
+            # Add to EEG buffer
             self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
             
             # Process if we have enough data
@@ -623,31 +678,33 @@ class EEGProcessingWorker(QtCore.QObject):
             })
     
     def _process_eeg_data(self):
-        """Process EEG data for real-time feedback and accumulate session data"""
+        """Process EEG data for real-time feedback and accumulate session data - Updated for multi-stream"""
         if not self.is_calibrated or not self.lsl_inlet:
             return
         
         try:
-            # Get data chunk
+            # Get EEG data chunk
             chunk, timestamps = self.lsl_inlet.pull_chunk(timeout=0.1, max_samples=LSL_CHUNK_MAX_PULL)
             
             if not chunk:
                 return
                 
-            # Process chunk
+            # Process EEG chunk
             chunk_np = np.array(chunk, dtype=np.float64).T
             eeg_chunk = chunk_np[EEG_CHANNEL_INDICES, :]
             
-            # Extract accelerometer data
-            ACC_CHANNEL_INDICES = [9, 10, 11]
-            if chunk_np.shape[0] > max(ACC_CHANNEL_INDICES):
-                try:
-                    acc_chunk = chunk_np[ACC_CHANNEL_INDICES, :]
-                    if acc_chunk.shape[1] > 0:
-                        latest_acc_sample = acc_chunk[:, -1]
-                        self.signal_quality_validator.add_accelerometer_data(latest_acc_sample)
-                except Exception as e:
-                    pass  # Non-critical error
+            # Get accelerometer data from appropriate source
+            acc_sample = None
+            if self.is_multi_stream:
+                # Multi-stream: get from separate accelerometer stream
+                acc_sample = self._get_accelerometer_data()
+            else:
+                # Single-stream: extract from EEG chunk
+                acc_sample = self._extract_accelerometer_from_eeg_chunk(chunk_np)
+            
+            # Add accelerometer data to signal quality validator if available
+            if acc_sample is not None:
+                self.signal_quality_validator.add_accelerometer_data(acc_sample)
             
             # Add to buffer
             self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
@@ -695,8 +752,7 @@ class EEGProcessingWorker(QtCore.QObject):
                             "bt_ratio": round(current_metrics['bt_ratio'], 3)
                         },
                         "signal_quality": {
-                            "accelerometer": self.signal_quality_validator.accelerometer_history[-1]['data'].tolist() 
-                                           if self.signal_quality_validator.accelerometer_history else [0, 0, 0],
+                            "accelerometer": acc_sample.tolist() if acc_sample is not None else [0, 0, 0],
                             "band_powers": current_metrics,
                             "quality_metrics": {
                                 "movement_score": signal_quality_metrics.movement_score,
@@ -797,7 +853,6 @@ class EEGProcessingWorker(QtCore.QObject):
             error_msg = f"Database save error: {e}"
             raise Exception(error_msg)
 
-    # Also update _accumulate_session_data to remove debug prints:
     def _accumulate_session_data(self, classification, current_metrics, eeg_window):
         """Accumulate all session data for later database saving"""
         current_time = time.time()
@@ -862,8 +917,7 @@ class EEGProcessingWorker(QtCore.QObject):
         
         print("EEG Worker: Cleared all session data arrays")
     
-    # [Keep all the existing helper methods: _filter_eeg_data, _calculate_band_powers, 
-    # _improved_artifact_rejection, _classify_mental_state_enhanced, _apply_prediction_smoothing, etc.]
+    # [Keep all the existing helper methods unchanged]
     
     def _filter_eeg_data(self, eeg_data):
         """Apply bandpass filter to EEG data"""
@@ -1095,3 +1149,7 @@ class EEGProcessingWorker(QtCore.QObject):
         if self.lsl_inlet:
             self.lsl_inlet.close_stream()
             self.lsl_inlet = None
+        
+        if self.lsl_accelerometer_inlet:
+            self.lsl_accelerometer_inlet.close_stream()
+            self.lsl_accelerometer_inlet = None
