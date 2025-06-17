@@ -60,12 +60,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_monitor_timer = None
         self.unity_data_timer = None
         
-        # SESSION METRICS ACCUMULATION - NEW APPROACH
-        self.session_predictions = []
-        self.session_on_target = []
-        self.session_prediction_timestamps = []
-        self.session_confidence_scores = []
-        
         # Page-specific configuration
         self._setup_page_config()
         
@@ -291,7 +285,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
                     button.setToolTip(tooltip_text)
                     button.setEnabled(enabled)
 
-    # EEG Worker Management (same for both pages)
+    # EEG Worker Management - SIMPLIFIED
     def _setup_eeg_worker(self):
         """Set up the EEG processing worker and thread"""
         if self.eeg_worker is not None:
@@ -308,14 +302,14 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             # Move worker to thread
             self.eeg_worker.moveToThread(self.eeg_thread)
             
-            # Connect worker signals
+            # Connect worker signals - SIMPLIFIED
             self.eeg_worker.connection_status_changed.connect(self.on_connection_status_changed)
             self.eeg_worker.calibration_progress.connect(self.on_calibration_progress)
             self.eeg_worker.calibration_status_changed.connect(self.on_calibration_status_changed)
             self.eeg_worker.new_prediction.connect(self.on_new_eeg_prediction)
             self.eeg_worker.signal_quality_update.connect(self.on_signal_quality_update)
             self.eeg_worker.error_occurred.connect(self.on_eeg_error)
-            self.eeg_worker.session_data_ready.connect(self.on_session_data_ready)
+            self.eeg_worker.session_saved.connect(self.on_session_saved)  # NEW SIGNAL
             
             # Connect thread signals
             self.eeg_thread.started.connect(self.eeg_worker.initialize)
@@ -346,7 +340,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
                 self.eeg_worker.new_prediction.disconnect()
                 self.eeg_worker.signal_quality_update.disconnect()
                 self.eeg_worker.error_occurred.disconnect()
-                self.eeg_worker.session_data_ready.disconnect()
+                self.eeg_worker.session_saved.disconnect()
             except TypeError:
                 pass
             
@@ -363,9 +357,9 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         
         print("EEG worker cleanup complete")
 
-    # Session Management
+    # Session Management - SIMPLIFIED
     def start_session(self, session_subtype):
-        """Unified session start method"""
+        """Unified session start method - SIMPLIFIED"""
         print(f"{self.page_type.title()} Page: Starting {session_subtype} session")
         
         # Common validation
@@ -378,9 +372,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         if self.session_goal:
             QtWidgets.QMessageBox.warning(self, "Session Active", "A session is already running.")
             return
-
-        # CLEAR SESSION METRICS ARRAYS - NEW
-        self._clear_session_metrics()
 
         # Setup EEG worker
         if not self._setup_eeg_worker():
@@ -395,21 +386,28 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         elif session_subtype == "work" and self.page_type == "focus":
             self._start_work_session()
 
-    def _clear_session_metrics(self):
-        """Clear session metrics arrays for new session - NEW METHOD"""
-        self.session_predictions = []
-        self.session_on_target = []
-        self.session_prediction_timestamps = []
-        self.session_confidence_scores = []
-        print("Page Widget: Cleared session metrics arrays")
-
     def _start_video_session(self):
-        """Start video feedback session"""
+        """Start video feedback session - SIMPLIFIED"""
         self.session_goal = self.eeg_session_type
         self.is_calibrating = True
         self.is_calibrated = False
         self.calibration_progress_value = 0
         self.signal_quality_validator.reset()
+        
+        # Create database session FIRST
+        if self.page_type == "meditation":
+            self.session_target_label = "Relaxed"
+            session_type_for_db = "Meditation-Video"
+            target_metric_for_db = "Relaxation"
+        else:
+            self.session_target_label = "Focused"
+            session_type_for_db = "Focus-Video"
+            target_metric_for_db = "Concentration"
+
+        self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
+            self.user_id, session_type_for_db, target_metric_for_db
+        )
+        print(f"Page Widget: Created database session {self.current_session_id}")
         
         # Create video player window with signal quality widget
         if not self.video_player_window:
@@ -431,28 +429,16 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.video_player_window.show()
         self.video_player_window.activateWindow()
 
-        # Set target label and database session
-        if self.page_type == "meditation":
-            self.session_target_label = "Relaxed"
-            session_type_for_db = "Meditation-Video"
-            target_metric_for_db = "Relaxation"
-        else:
-            self.session_target_label = "Focused"
-            session_type_for_db = "Focus-Video"
-            target_metric_for_db = "Concentration"
-
-        self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
-            self.user_id, session_type_for_db, target_metric_for_db
-        )
-
         self.update_button_states(self.main_app_window.is_lsl_connected)
         
-        # Start the EEG session
+        # Start the EEG session - PASS SESSION ID
         QtCore.QMetaObject.invokeMethod(self.eeg_worker, "start_session", 
-                                      QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, self.eeg_session_type))
+                                      QtCore.Qt.QueuedConnection, 
+                                      QtCore.Q_ARG(str, self.eeg_session_type),
+                                      QtCore.Q_ARG(int, self.current_session_id))
 
     def _start_unity_session(self):
-        """Start Unity game session"""
+        """Start Unity game session - SIMPLIFIED"""
         if not self.user_id:
             QtWidgets.QMessageBox.warning(self, "User Not Logged In", "You must be logged in to start a session.")
             return
@@ -473,12 +459,13 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.is_calibrating = True
         self.is_calibrated = False
         
-        # Start database session
+        # Start database session FIRST
         session_type = f"{self.page_type.title()}-Unity"
         target_metric = "Relaxation" if self.page_type == "meditation" else "Concentration"
         self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
             self.user_id, session_type, target_metric
         )
+        print(f"Page Widget: Created database session {self.current_session_id}")
         
         # Show calibration dialog
         self.calibration_dialog = QtWidgets.QProgressDialog("Calibrating EEG data...", None, 0, 100, self)
@@ -493,12 +480,14 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.eeg_worker.calibration_progress.connect(self.on_unity_calibration_progress)
         self.eeg_worker.calibration_status_changed.connect(self.on_unity_calibration_status)
         
-        # Start calibration
+        # Start calibration - PASS SESSION ID
         QtCore.QMetaObject.invokeMethod(self.eeg_worker, "start_session", 
-                                      QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, self.eeg_session_type))
+                                      QtCore.Qt.QueuedConnection, 
+                                      QtCore.Q_ARG(str, self.eeg_session_type),
+                                      QtCore.Q_ARG(int, self.current_session_id))
 
     def _start_work_session(self):
-        """Start work session (focus page only)"""
+        """Start work session (focus page only) - SIMPLIFIED"""
         if self.page_type != "focus":
             return
             
@@ -511,10 +500,11 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_alert_shown = False
         self.focus_monitoring_active = False
         
-        # Create database session
+        # Create database session FIRST
         self.current_session_id, self.current_session_start_time = db_manager.start_new_session(
             self.user_id, "Focus-Work", "Concentration"
         )
+        print(f"Page Widget: Created database session {self.current_session_id}")
         
         # Launch the work focus monitor window
         self.work_monitor_window = QtWidgets.QDialog(self)
@@ -537,9 +527,11 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         # Update UI buttons
         self.update_button_states(self.main_app_window.is_lsl_connected)
         
-        # Start EEG processing
+        # Start EEG processing - PASS SESSION ID
         QtCore.QMetaObject.invokeMethod(self.eeg_worker, "start_session", 
-                                      QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, "FOCUS"))
+                                      QtCore.Qt.QueuedConnection, 
+                                      QtCore.Q_ARG(str, "FOCUS"),
+                                      QtCore.Q_ARG(int, self.current_session_id))
 
     def _setup_work_monitor_ui(self):
         """Setup UI for work monitor window"""
@@ -593,7 +585,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         stop_button.clicked.connect(self.stop_active_session)
         monitor_layout.addWidget(stop_button)
 
-    # Signal Handlers
+    # Signal Handlers - SIMPLIFIED (no more data handling)
     @QtCore.pyqtSlot(str, str)
     def on_connection_status_changed(self, status, message):
         """Handle connection status updates from EEG worker"""
@@ -687,7 +679,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(dict)
     def on_new_eeg_prediction(self, prediction_data):
-        """Handle new EEG predictions from worker - UPDATED TO ACCUMULATE"""
+        """Handle new EEG predictions from worker - UI FEEDBACK ONLY"""
         if self.is_calibrating or not self.is_calibrated:
             return
             
@@ -702,19 +694,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         confidence = classification.get("confidence", 0.0)
 
         self.last_prediction = classification
-
-        # ACCUMULATE SESSION METRICS - NEW APPROACH
-        current_time = time.time()
-        is_on_target = level > 0  # Simplified on-target logic
-        
-        self.session_predictions.append(state)
-        self.session_on_target.append(is_on_target)
-        self.session_prediction_timestamps.append(current_time)
-        self.session_confidence_scores.append(confidence)
-        
-        # Debug print occasionally
-        if len(self.session_predictions) % 20 == 0:
-            print(f"Page Widget: Accumulated {len(self.session_predictions)} predictions")
 
         # Send to Unity if connected
         if self.client and self.session_goal and "UNITY" in self.session_goal:
@@ -753,42 +732,25 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             else:
                 self.stop_active_session()
 
-    @QtCore.pyqtSlot(dict)
-    def on_session_data_ready(self, session_data):
-        """Handle session data from EEG worker for saving"""
-        if self.current_session_id:
-            try:
-                # Save accumulated session metrics as arrays - NEW APPROACH
-                if self.session_predictions:
-                    print(f"Page Widget: Saving {len(self.session_predictions)} session metrics as arrays")
-                    db_manager.save_session_metrics_batch(
-                        self.current_session_id,
-                        self.session_predictions,
-                        self.session_on_target,
-                        self.session_prediction_timestamps
-                    )
-                
-                # Save band data
-                if session_data.get("band_data") and session_data["band_data"].get("alpha"):
-                    print(f"Page Widget: Saving {len(session_data['band_data']['alpha'])} band data points")
-                    db_manager.save_session_band_data_batch(
-                        self.current_session_id,
-                        session_data["band_data"]
-                    )
-                
-                # Save EEG data
-                if session_data.get("eeg_data") and session_data["eeg_data"].get("channel_0"):
-                    print(f"Page Widget: Saving {len(session_data['eeg_data']['channel_0'])} EEG data points")
-                    db_manager.save_session_eeg_data_batch(
-                        self.current_session_id,
-                        session_data["eeg_data"],
-                        session_data.get("sampling_rate", 256.0)
-                    )
-                    
-                print("Page Widget: Session data saved successfully")
-                
-            except Exception as e:
-                print(f"Page Widget: Error saving session data: {e}")
+    @QtCore.pyqtSlot(int, dict)
+    def on_session_saved(self, session_id, summary_stats):
+        """Handle session saved notification from EEG worker - NEW"""
+        print(f"Page Widget: Session {session_id} saved successfully!")
+        print(f"  - Total predictions: {summary_stats.get('total_predictions', 0)}")
+        print(f"  - Percent on target: {summary_stats.get('percent_on_target', 0.0):.1f}%")
+        print(f"  - Band data points: {summary_stats.get('band_data_points', 0)}")
+        print(f"  - EEG data points: {summary_stats.get('eeg_data_points', 0)}")
+        
+        # Show success message to user (optional)
+        if summary_stats.get('total_predictions', 0) > 0:
+            QtWidgets.QMessageBox.information(
+                self, 
+                "Session Saved", 
+                f"Session completed successfully!\n\n"
+                f"Duration: {summary_stats.get('total_predictions', 0)} predictions\n"
+                f"On target: {summary_stats.get('percent_on_target', 0.0):.1f}%\n"
+                f"Data points saved: {summary_stats.get('band_data_points', 0)} band + {summary_stats.get('eeg_data_points', 0)} EEG"
+            )
 
     # Feedback Methods (unchanged)
     def update_video_feedback(self, state, level, smooth_value, state_key):
@@ -906,16 +868,17 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             if len(self.focus_history) > 60:
                 self.focus_history.pop(0)
 
-    # Session Management
+    # Session Management - SIMPLIFIED
     def handle_video_session_stopped_signal(self):
         """Called when video player emits session_stopped"""
         print(f"{self.page_type.title()}Page: Received session_stopped signal from VideoPlayerWindow.")
         self.stop_video_session_logic()
 
     def stop_video_session_logic(self, triggered_by_error=False):
-        """Core logic to stop the video session"""
+        """Core logic to stop the video session - SIMPLIFIED"""
         print(f"{self.page_type.title()} Page: Stopping video session logic...")
 
+        # Tell EEG worker to stop (it will handle database saving)
         if self.eeg_worker:
             QtCore.QMetaObject.invokeMethod(self.eeg_worker, "stop_session", QtCore.Qt.QueuedConnection)
 
@@ -929,14 +892,12 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
                 self.video_player_window.close()
             self.video_player_window = None
 
-        if self.current_session_id:
-            db_manager.end_session(self.current_session_id)
-            self.current_session_id = None
-
+        # Reset session state (don't need to handle DB - worker does it)
+        self.current_session_id = None
         self._reset_ui_and_state()
 
     def stop_active_session(self):
-        """Stop any active session"""
+        """Stop any active session - SIMPLIFIED"""
         print(f"{self.page_type.title()} Page: Stopping active session...")
         
         # Stop timers
@@ -947,7 +908,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         if hasattr(self, 'unity_data_timer') and self.unity_data_timer and self.unity_data_timer.isActive():
             self.unity_data_timer.stop()
         
-        # Stop EEG worker
+        # Tell EEG worker to stop (it will handle database saving)
         if self.eeg_worker:
             QtCore.QMetaObject.invokeMethod(self.eeg_worker, "stop_session", QtCore.Qt.QueuedConnection)
         
@@ -965,15 +926,12 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             self.video_player_window.close()
             self.video_player_window = None
         
-        # End database session
-        if self.current_session_id:
-            db_manager.end_session(self.current_session_id)
-            self.current_session_id = None
-
+        # Reset session state (don't need to handle DB - worker does it)
+        self.current_session_id = None
         self._reset_ui_and_state()
 
     def _reset_ui_and_state(self):
-        """Reset UI elements and internal state"""
+        """Reset UI elements and internal state - SIMPLIFIED"""
         self.session_goal = None
         self.is_calibrating = False
         self.is_calibrated = False
@@ -983,9 +941,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_drop_counter = 0
         self.focus_alert_shown = False
         self.last_sent_scene_index = -1
-        
-        # Clear session metrics arrays - NEW
-        self._clear_session_metrics()
         
         if self.main_app_window and hasattr(self.main_app_window, 'is_lsl_connected'):
             self.update_button_states(self.main_app_window.is_lsl_connected)
@@ -1122,13 +1077,12 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         if hasattr(self, 'unity_data_timer') and self.unity_data_timer and self.unity_data_timer.isActive():
             self.unity_data_timer.stop()
         
+        # Tell EEG worker to stop (it will handle database saving)
         if self.eeg_worker:
             QtCore.QMetaObject.invokeMethod(self.eeg_worker, "stop_session", QtCore.Qt.QueuedConnection)
         
-        if self.current_session_id:
-            db_manager.end_session(self.current_session_id)
-            self.current_session_id = None
-        
+        # Reset session state (don't need to handle DB - worker does it)
+        self.current_session_id = None
         self.session_goal = None
         self.update_button_states(self.main_app_window.is_lsl_connected)
 

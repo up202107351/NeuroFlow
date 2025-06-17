@@ -2,11 +2,7 @@
 """
 EEG Processing Worker - Qt Threading-based EEG Processing
 
-This worker runs in a separate thread and handles:
-1. LSL connection to EEG device
-2. Baseline calibration with signal quality monitoring
-3. Real-time EEG processing and state classification
-4. Direct Qt signal emission for UI updates
+Updated to handle all session data accumulation and save directly to database.
 """
 
 import time
@@ -17,6 +13,7 @@ from datetime import datetime
 from scipy.signal import butter, filtfilt, welch
 from PyQt5 import QtCore
 from backend.signal_quality_validator import SignalQualityValidator
+from backend import database_manager as db_manager
 
 # Set up logging
 logging.basicConfig(
@@ -62,17 +59,17 @@ highcut = 30.0
 class EEGProcessingWorker(QtCore.QObject):
     """
     EEG Processing Worker that runs in a separate thread.
-    Handles all EEG processing and emits Qt signals for UI updates.
+    Handles all EEG processing, data accumulation, and database saving.
     """
     
-    # Signals for UI communication
+    # Signals for UI communication (reduced - no session_data_ready needed)
     connection_status_changed = QtCore.pyqtSignal(str, str)  # status, message
     calibration_progress = QtCore.pyqtSignal(float)  # 0.0 to 1.0
     calibration_status_changed = QtCore.pyqtSignal(str, dict)  # status, data
-    new_prediction = QtCore.pyqtSignal(dict)  # prediction data with signal quality
+    new_prediction = QtCore.pyqtSignal(dict)  # prediction data for UI feedback only
     signal_quality_update = QtCore.pyqtSignal(dict)  # real-time quality metrics
     error_occurred = QtCore.pyqtSignal(str)  # error message
-    session_data_ready = QtCore.pyqtSignal(dict)  # session data for saving
+    session_saved = QtCore.pyqtSignal(int, dict)  # session_id, summary_stats
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,6 +83,7 @@ class EEGProcessingWorker(QtCore.QObject):
         self.is_calibrated = False
         self.is_calibrating = False
         self.current_session_type = None
+        self.current_session_id = None  # Store session ID directly
         self.session_start_time = None
         
         # EEG processing state
@@ -101,7 +99,7 @@ class EEGProcessingWorker(QtCore.QObject):
         # Signal quality validator
         self.signal_quality_validator = SignalQualityValidator()
         
-        # Filter coefficients (will be updated when sampling rate is known)
+        # Filter coefficients
         self.b = None
         self.a = None
         self.nfft = DataFilter.get_nearest_power_of_two(int(DEFAULT_SAMPLING_RATE * PSD_WINDOW_SECONDS))
@@ -111,18 +109,32 @@ class EEGProcessingWorker(QtCore.QObject):
         self.processing_timer = QtCore.QTimer()
         self.processing_timer.timeout.connect(self._process_eeg_data)
         
-        # Session data collection
+        # SESSION DATA ACCUMULATION - ALL IN WORKER NOW
+        self.session_predictions = []
+        self.session_on_target = []
+        self.session_timestamps = []
+        self.session_confidence_scores = []
+        
+        # Band power data accumulation
         self.session_band_data = {
             "alpha": [],
             "beta": [],
             "theta": [],
             "ab_ratio": [],
-            "bt_ratio": []
+            "bt_ratio": [],
+            "timestamps": []
         }
-        self.session_eeg_data = []
-        self.session_timestamps = []
         
-        # Enhanced prediction smoothing and stabilization (from GUI)
+        # EEG data accumulation (downsampled for storage)
+        self.session_eeg_data = {
+            "channel_0": [],
+            "channel_1": [],
+            "channel_2": [],
+            "channel_3": [],
+            "timestamps": []
+        }
+        
+        # Prediction smoothing and stabilization
         self.prediction_smoothing_window = 5
         self.min_confidence_for_change = 0.6
         self.state_change_threshold = 1.0
@@ -138,13 +150,13 @@ class EEGProcessingWorker(QtCore.QObject):
             'state': 'Unknown', 'level': 0, 'confidence': 0.0, 'smooth_value': 0.5
         }
         
-        # State tracking with momentum (from GUI)
+        # State tracking with momentum
         self.state_momentum = 0.75
         self.state_velocity = 0.0
         self.level_momentum = 0.8
         self.level_velocity = 0.0
         
-        # State thresholds (simplified version of GUI's dynamic thresholds)
+        # State thresholds
         self.current_thresholds = {
             'alpha_incr': [1.10, 1.25, 1.50],
             'alpha_decr': [0.90, 0.80, 0.65],
@@ -166,7 +178,7 @@ class EEGProcessingWorker(QtCore.QObject):
         
     @QtCore.pyqtSlot()
     def connect_to_lsl(self):
-        """Connect to the LSL stream with detailed channel debugging"""
+        """Connect to the LSL stream"""
         logger.info(f"Looking for LSL stream (Type: '{LSL_STREAM_TYPE}')...")
         
         try:
@@ -185,26 +197,7 @@ class EEGProcessingWorker(QtCore.QObject):
             lsl_sr = info.nominal_srate()
             self.sampling_rate = lsl_sr if lsl_sr > 0 else DEFAULT_SAMPLING_RATE
             
-            # DEBUG: Print detailed channel information
-            print(f"EEG Worker: LSL Stream Info:")
-            print(f"  Name: {info.name()}")
-            print(f"  Type: {info.type()}")
-            print(f"  Channel count: {info.channel_count()}")
-            print(f"  Sampling rate: {self.sampling_rate}")
-            print(f"  Expected EEG channels: {EEG_CHANNEL_INDICES}")
-            print(f"  Expected ACC channels: [9, 10, 11]")
-            
-            # Try to get channel labels if available
-            try:
-                ch = info.desc().child("channels").child("channel")
-                for i in range(info.channel_count()):
-                    label = ch.child_value("label")
-                    print(f"  Channel {i}: {label}")
-                    ch = ch.next_sibling()
-            except:
-                print("  Channel labels not available")
-            
-            # Update filter coefficients and processing parameters
+            # Update filter coefficients
             self._update_filter_coefficients()
             
             device_name = info.name()
@@ -215,7 +208,6 @@ class EEGProcessingWorker(QtCore.QObject):
             if info.channel_count() < np.max(EEG_CHANNEL_INDICES) + 1:
                 error_msg = f"LSL stream has insufficient channels. Need at least {np.max(EEG_CHANNEL_INDICES) + 1}, got {info.channel_count()}"
                 logger.error(error_msg)
-                print(f"EEG Worker: {error_msg}")
                 self.connection_status_changed.emit("ERROR", error_msg)
                 self.error_occurred.emit(error_msg)
                 return False
@@ -238,22 +230,23 @@ class EEGProcessingWorker(QtCore.QObject):
         self.nfft = DataFilter.get_nearest_power_of_two(int(self.sampling_rate * PSD_WINDOW_SECONDS))
         self.welch_overlap_samples = self.nfft // 2
     
-    @QtCore.pyqtSlot(str)
-    def start_session(self, session_type):
-        """Start a new session of the specified type"""
+    @QtCore.pyqtSlot(str, int)
+    def start_session(self, session_type, session_id):
+        """Start a new session with session ID from page widget"""
         if session_type not in [SESSION_TYPE_RELAX, SESSION_TYPE_FOCUS]:
             error_msg = f"Invalid session type: {session_type}"
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
             return
             
-        logger.info(f"Starting {session_type} session")
+        logger.info(f"Starting {session_type} session with ID {session_id}")
         
         # Reset state
         self.is_calibrated = False
         self.is_calibrating = False
         self.running = True
         self.current_session_type = session_type
+        self.current_session_id = session_id  # Store session ID
         self.session_start_time = None
         self.recent_metrics_history = []
         self.previous_states = []
@@ -282,7 +275,7 @@ class EEGProcessingWorker(QtCore.QObject):
         QtCore.QTimer.singleShot(100, self._start_calibration)
 
     def _start_calibration(self):
-        """Start the calibration process with better error handling"""
+        """Start the calibration process"""
         if not self.current_session_type:
             self.error_occurred.emit("Cannot start calibration: No active session")
             return
@@ -302,7 +295,7 @@ class EEGProcessingWorker(QtCore.QObject):
                 })
                 return
         
-        # Test LSL connection by trying to pull some data
+        # Test LSL connection
         try:
             print("EEG Worker: Testing LSL connection...")
             test_chunk, _ = self.lsl_inlet.pull_chunk(timeout=2.0, max_samples=10)
@@ -346,26 +339,29 @@ class EEGProcessingWorker(QtCore.QObject):
     
     @QtCore.pyqtSlot()
     def stop_session(self):
-        """Stop the current session"""
-        logger.info("Stopping session")
+        """Stop the current session and save all data to database"""
+        logger.info("Stopping session and saving data to database")
         
         # Stop processing
         if self.processing_timer.isActive():
             self.processing_timer.stop()
         
-        # Emit session data for saving
-        if self.current_session_type and self.session_band_data["alpha"]:
-            session_data = {
-                "session_type": self.current_session_type,
-                "band_data": self.session_band_data.copy(),
-                "eeg_data": self.session_eeg_data.copy(),
-                "timestamps": self.session_timestamps.copy(),
-                "sampling_rate": self.sampling_rate
-            }
-            self.session_data_ready.emit(session_data)
+        # Save all session data to database
+        if self.current_session_id and self._has_session_data():
+            try:
+                summary_stats = self._save_session_to_database()
+                self.session_saved.emit(self.current_session_id, summary_stats)
+                print(f"EEG Worker: Successfully saved session {self.current_session_id} to database")
+            except Exception as e:
+                error_msg = f"Error saving session data to database: {e}"
+                print(f"EEG Worker: {error_msg}")
+                self.error_occurred.emit(error_msg)
+        else:
+            print("EEG Worker: No session data to save")
         
         # Reset state
         self.current_session_type = None
+        self.current_session_id = None
         self.session_start_time = None
         self.is_calibrated = False
         self.is_calibrating = False
@@ -405,7 +401,7 @@ class EEGProcessingWorker(QtCore.QObject):
         QtCore.QTimer.singleShot(100, self._start_calibration)   
     
     def _perform_calibration(self):
-        """Perform calibration with signal quality monitoring and detailed debugging"""
+        """Perform calibration with signal quality monitoring"""
         print(f"EEG Worker: _perform_calibration starting - running: {self.running}, is_calibrating: {self.is_calibrating}")
     
         if not self.running:
@@ -480,34 +476,26 @@ class EEGProcessingWorker(QtCore.QObject):
                         self.signal_quality_validator.add_accelerometer_data(latest_acc_sample)
                 except Exception as e:
                     print(f"EEG Worker: Could not extract accelerometer data: {e}")
-            else:
-                print(f"EEG Worker: No accelerometer channels available (need >{max(ACC_CHANNEL_INDICES)}, have {chunk_np.shape[0]})")
             
             # Add to buffer
-            old_buffer_size = self.eeg_buffer.shape[1]
             self.eeg_buffer = np.append(self.eeg_buffer, eeg_chunk, axis=1)
-            new_buffer_size = self.eeg_buffer.shape[1]
             
             # Process if we have enough data
             if self.eeg_buffer.shape[1] >= self.nfft:
                 chunks_processed += 1
                 
                 eeg_window = self.eeg_buffer[:, -self.nfft:]
-                # print(f"EEG Worker: Processing window shape: {eeg_window.shape}")
                 
                 try:
                     filtered_window = self._filter_eeg_data(eeg_window)
-                    #print(f"EEG Worker: Filtered window shape: {filtered_window.shape}")
-                    
                     metrics = self._calculate_band_powers(filtered_window)
-                    #print(f"EEG Worker: Calculated metrics: {metrics}")
                     
                     if metrics:
                         # Add to signal quality validator
                         self.signal_quality_validator.add_band_power_data(metrics)
                         self.signal_quality_validator.add_raw_eeg_data(eeg_window)
                         
-                        # UPDATE SIGNAL QUALITY MORE FREQUENTLY (every 1 second)
+                        # Update signal quality
                         if current_time - last_quality_update >= 1.0:
                             quality_metrics = self.signal_quality_validator.assess_overall_quality()
                             print(f"EEG Worker: Quality score: {quality_metrics.overall_score} ({quality_metrics.quality_level})")
@@ -557,7 +545,7 @@ class EEGProcessingWorker(QtCore.QObject):
                         # Update progress
                         progress = min(1.0, (time.time() - calibration_start_time) / CALIBRATION_DURATION_SECONDS)
                         self.calibration_progress.emit(progress)
-                        if int(progress * 100) % 10 == 0:  # Print every 10%
+                        if int(progress * 100) % 10 == 0:
                             print(f"EEG Worker: Progress: {progress:.1%}")
                     else:
                         print(f"EEG Worker: Metrics calculation returned None")
@@ -570,32 +558,14 @@ class EEGProcessingWorker(QtCore.QObject):
             # Prevent excessive buffer growth
             max_buffer_size = int(self.sampling_rate * 10)
             if self.eeg_buffer.shape[1] > max_buffer_size:
-                old_size = self.eeg_buffer.shape[1]
                 self.eeg_buffer = self.eeg_buffer[:, -max_buffer_size:]
             
             QtCore.QCoreApplication.processEvents()
             time.sleep(0.001)
         
-        # Print final debug info
-        print(f"\nEEG Worker: Calibration loop finished")
-        print(f"  - Total duration: {time.time() - calibration_start_time:.1f}s")
-        print(f"  - Chunks received: {total_chunks_received}")
-        print(f"  - Chunks with no data: {chunks_with_no_data}")
-        print(f"  - Chunks processed: {chunks_processed}")
-        print(f"  - Chunks failed processing: {chunks_failed_processing}")
-        print(f"  - Total samples received: {total_samples_received}")
-        print(f"  - Final buffer size: {self.eeg_buffer.shape[1]}")
-        print(f"  - Metrics collected: {len(calibration_metrics_list)}")
-        print(f"  - Is calibrating: {self.is_calibrating}")
-        print(f"  - Running: {self.running}")
-        
         # Calculate baseline from calibration data
         if calibration_metrics_list and self.is_calibrating:
             print(f"EEG Worker: Creating baseline from {len(calibration_metrics_list)} metrics")
-            
-            # Debug: Print some metrics
-            for i, m in enumerate(calibration_metrics_list[:3]):  # Print first 3
-                print(f"  Metric {i}: alpha={m['alpha']:.3f}, beta={m['beta']:.3f}, theta={m['theta']:.3f}")
             
             self.baseline_metrics = {
                 'alpha': np.mean([m['alpha'] for m in calibration_metrics_list]),
@@ -645,25 +615,15 @@ class EEGProcessingWorker(QtCore.QObject):
             print(f"EEG Worker: Started processing timer with {int(ANALYSIS_WINDOW_SECONDS * 1000)}ms interval")
             
         else:
-            print(f"EEG Worker: Calibration failed - metrics list length: {len(calibration_metrics_list)}, is_calibrating: {self.is_calibrating}")
+            print(f"EEG Worker: Calibration failed - metrics list length: {len(calibration_metrics_list)}")
             self.is_calibrating = False
             self.calibration_status_changed.emit("FAILED", {
-                "error_message": f"No valid EEG data collected during calibration. "
-                            f"Collected {len(calibration_metrics_list)} metrics from {total_chunks_received} chunks.",
-                "debug_info": {
-                    "chunks_received": total_chunks_received,
-                    "chunks_no_data": chunks_with_no_data,
-                    "chunks_processed": chunks_processed,
-                    "chunks_failed": chunks_failed_processing,
-                    "total_samples": total_samples_received,
-                    "buffer_size": self.eeg_buffer.shape[1],
-                    "nfft_required": self.nfft
-                },
+                "error_message": f"No valid EEG data collected during calibration.",
                 "timestamp": time.time()
             })
     
     def _process_eeg_data(self):
-        """Process EEG data for real-time feedback"""
+        """Process EEG data for real-time feedback and accumulate session data"""
         if not self.is_calibrated or not self.lsl_inlet:
             return
         
@@ -708,16 +668,19 @@ class EEGProcessingWorker(QtCore.QObject):
                     
                     # Update history
                     self.recent_metrics_history.append(current_metrics)
-                    if len(self.recent_metrics_history) > 15:  # MAX_HISTORY_SIZE
+                    if len(self.recent_metrics_history) > 15:
                         self.recent_metrics_history.pop(0)
                     
-                    # Classify mental state using enhanced logic from GUI
+                    # Classify mental state
                     classification = self._classify_mental_state_enhanced(current_metrics)
                     
                     # Store current prediction
                     self.current_prediction = classification
                     
-                    # Prepare prediction data
+                    # ACCUMULATE ALL SESSION DATA
+                    self._accumulate_session_data(classification, current_metrics, eeg_window)
+                    
+                    # Prepare prediction data for UI feedback only
                     prediction_data = {
                         "message_type": "PREDICTION",
                         "timestamp": time.time(),
@@ -747,11 +710,8 @@ class EEGProcessingWorker(QtCore.QObject):
                         }
                     }
                     
-                    # Emit prediction
+                    # Emit prediction for UI feedback only
                     self.new_prediction.emit(prediction_data)
-                    
-                    # Store data for session
-                    self._store_session_data(current_metrics, eeg_window)
             
             # Prevent excessive buffer growth
             max_buffer_size = int(self.sampling_rate * 10)
@@ -761,6 +721,148 @@ class EEGProcessingWorker(QtCore.QObject):
         except Exception as e:
             logger.error(f"Error in EEG processing: {e}")
             self.error_occurred.emit(f"EEG processing error: {e}")
+    
+    def _calculate_is_on_target(self, level):
+        """Calculate if current state is 'on target' based on session type and level"""
+        if self.current_session_type == SESSION_TYPE_RELAX:
+            # For relaxation, positive levels (relaxed states) are on target
+            return level > 0
+        elif self.current_session_type == SESSION_TYPE_FOCUS:
+            # For focus, positive levels (focused states) are on target
+            return level > 0
+        else:
+            # Default case
+            return level > 0
+    
+    def _has_session_data(self):
+        """Check if we have any session data to save"""
+        return (len(self.session_predictions) > 0 or 
+                len(self.session_band_data["alpha"]) > 0 or 
+                len(self.session_eeg_data["channel_0"]) > 0)
+    
+    def _save_session_to_database(self):
+        """Save all accumulated session data to database and return summary stats"""
+        if not self.current_session_id:
+            raise Exception("No session ID available for saving")
+        
+        summary_stats = {
+            "total_predictions": len(self.session_predictions),
+            "on_target_count": sum(self.session_on_target),
+            "percent_on_target": 0.0,
+            "band_data_points": len(self.session_band_data["alpha"]),
+            "eeg_data_points": len(self.session_eeg_data["channel_0"])
+        }
+        
+        # Calculate percentage on target
+        if summary_stats["total_predictions"] > 0:
+            summary_stats["percent_on_target"] = (summary_stats["on_target_count"] / summary_stats["total_predictions"]) * 100.0
+        
+        try:
+            # Save session metrics (predictions, on_target, timestamps)
+            if self.session_predictions:
+                success = db_manager.save_session_metrics_batch(
+                    self.current_session_id,
+                    self.session_predictions,
+                    self.session_on_target,
+                    self.session_timestamps
+                )
+                if not success:
+                    raise Exception("Failed to save session metrics")
+            
+            # Save band data
+            if self.session_band_data["alpha"]:
+                success = db_manager.save_session_band_data_batch(
+                    self.current_session_id,
+                    self.session_band_data
+                )
+                if not success:
+                    raise Exception("Failed to save band data")
+            
+            # Save EEG data
+            if self.session_eeg_data["channel_0"]:
+                success = db_manager.save_session_eeg_data_batch(
+                    self.current_session_id,
+                    self.session_eeg_data,
+                    self.sampling_rate
+                )
+                if not success:
+                    raise Exception("Failed to save EEG data")
+            
+            # End the session and create summary
+            db_manager.end_session(self.current_session_id)
+            
+            return summary_stats
+            
+        except Exception as e:
+            error_msg = f"Database save error: {e}"
+            raise Exception(error_msg)
+
+    # Also update _accumulate_session_data to remove debug prints:
+    def _accumulate_session_data(self, classification, current_metrics, eeg_window):
+        """Accumulate all session data for later database saving"""
+        current_time = time.time()
+        
+        # Calculate is_on_target based on session type and level
+        level = classification.get('level', 0)
+        is_on_target = self._calculate_is_on_target(level)
+        
+        # Store prediction data
+        self.session_predictions.append(classification.get('state', 'Unknown'))
+        self.session_on_target.append(is_on_target)
+        self.session_timestamps.append(current_time)
+        self.session_confidence_scores.append(classification.get('confidence', 0.0))
+        
+        # Store band data
+        self.session_band_data["alpha"].append(round(current_metrics['alpha'], 3))
+        self.session_band_data["beta"].append(round(current_metrics['beta'], 3))
+        self.session_band_data["theta"].append(round(current_metrics['theta'], 3))
+        self.session_band_data["ab_ratio"].append(round(current_metrics['ab_ratio'], 3))
+        self.session_band_data["bt_ratio"].append(round(current_metrics['bt_ratio'], 3))
+        self.session_band_data["timestamps"].append(current_time)
+        
+        # Store EEG data (downsampled for storage efficiency)
+        if eeg_window.shape[1] >= self.nfft:
+            # Downsample by taking every 4th sample for storage
+            downsample_factor = 4
+            downsampled_indices = np.arange(0, eeg_window.shape[1], downsample_factor)
+            eeg_downsampled = eeg_window[:, downsampled_indices]
+            
+            # Store each sample
+            for i in range(eeg_downsampled.shape[1]):
+                self.session_eeg_data["channel_0"].append(float(eeg_downsampled[0, i]))
+                self.session_eeg_data["channel_1"].append(float(eeg_downsampled[1, i]))
+                self.session_eeg_data["channel_2"].append(float(eeg_downsampled[2, i]))
+                self.session_eeg_data["channel_3"].append(float(eeg_downsampled[3, i]))
+                self.session_eeg_data["timestamps"].append(current_time + (i * downsample_factor / self.sampling_rate))
+    
+    def _clear_session_data(self):
+        """Clear all session data storage"""
+        self.session_predictions = []
+        self.session_on_target = []
+        self.session_timestamps = []
+        self.session_confidence_scores = []
+        
+        self.session_band_data = {
+            "alpha": [],
+            "beta": [],
+            "theta": [],
+            "ab_ratio": [],
+            "bt_ratio": [],
+            "timestamps": []
+        }
+        
+        self.session_eeg_data = {
+            "channel_0": [],
+            "channel_1": [],
+            "channel_2": [],
+            "channel_3": [],
+            "timestamps": []
+        }
+        
+        print("EEG Worker: Cleared all session data arrays")
+    
+    # [Keep all the existing helper methods: _filter_eeg_data, _calculate_band_powers, 
+    # _improved_artifact_rejection, _classify_mental_state_enhanced, _apply_prediction_smoothing, etc.]
     
     def _filter_eeg_data(self, eeg_data):
         """Apply bandpass filter to EEG data"""
@@ -845,7 +947,7 @@ class EEGProcessingWorker(QtCore.QObject):
         return amplitude_mask & diff_mask
     
     def _classify_mental_state_enhanced(self, current_metrics):
-        """Enhanced classify mental state with smoothing and stability (from GUI)"""
+        """Enhanced classify mental state with smoothing and stability"""
         if not self.baseline_metrics or not current_metrics:
             return {
                 "state": "Unknown", "level": 0, "confidence": 0.0,
@@ -915,7 +1017,7 @@ class EEGProcessingWorker(QtCore.QObject):
         return smoothed_prediction
     
     def _apply_prediction_smoothing(self, raw_state, raw_level, confidence, raw_value):
-        """Apply smoothing and stability requirements to predictions (from GUI)"""
+        """Apply smoothing and stability requirements to predictions"""
         # Get previous smoothed value
         if self.prediction_history:
             prev_smooth_value = self.prediction_history[-1]['smooth_value']
@@ -978,83 +1080,6 @@ class EEGProcessingWorker(QtCore.QObject):
             self.prediction_history.pop(0)
         
         return prediction
-    
-    def _classify_mental_state(self, current_metrics):
-        """Legacy classify mental state method - kept for compatibility"""
-        return self._classify_mental_state_enhanced(current_metrics)
-    
-    def _calculate_state_probabilities(self, current_metrics):
-        """Calculate probabilities for different mental states"""
-        if not self.baseline_metrics:
-            return {
-                'relaxed': 0.5,
-                'focused': 0.5,
-                'drowsy': 0.2,
-                'internal_focus': 0.3,
-                'neutral': 0.7
-            }
-        
-        def sigmoid(x, k=5):
-            return 1 / (1 + np.exp(-k * x))
-        
-        # Calculate normalized differences from baseline
-        alpha_diff = current_metrics['alpha'] / self.baseline_metrics['alpha'] - 1.0
-        beta_diff = current_metrics['beta'] / self.baseline_metrics['beta'] - 1.0
-        theta_diff = current_metrics['theta'] / self.baseline_metrics['theta'] - 1.0
-        ab_ratio_diff = current_metrics['ab_ratio'] / self.baseline_metrics['ab_ratio'] - 1.0
-        bt_ratio_diff = current_metrics['bt_ratio'] / self.baseline_metrics['bt_ratio'] - 1.0
-        
-        # Calculate state probabilities
-        relaxation_signal = 0.4 * alpha_diff + 0.6 * ab_ratio_diff
-        relaxed_prob = sigmoid(relaxation_signal, k=3)
-        
-        alpha_inverse_diff = 1.0 - (current_metrics['alpha'] / self.baseline_metrics['alpha'])
-        focus_signal = 0.3 * beta_diff + 0.5 * bt_ratio_diff + 0.2 * max(0, alpha_inverse_diff)
-        focused_prob = sigmoid(focus_signal, k=3)
-        
-        drowsy_signal = 0.6 * theta_diff - 0.4 * beta_diff
-        drowsy_prob = sigmoid(drowsy_signal, k=3)
-        
-        internal_focus_signal = 0.5 * beta_diff + 0.5 * alpha_diff
-        internal_focus_prob = sigmoid(internal_focus_signal, k=3)
-        
-        baseline_closeness = -2.0 * (abs(alpha_diff) + abs(beta_diff) + abs(theta_diff))
-        neutral_prob = sigmoid(baseline_closeness, k=5)
-        
-        return {
-            'relaxed': relaxed_prob,
-            'focused': focused_prob,
-            'drowsy': drowsy_prob,
-            'internal_focus': internal_focus_prob,
-            'neutral': neutral_prob
-        }
-    
-    def _store_session_data(self, current_metrics, eeg_window):
-        """Store session data for later saving"""
-        # Store band data
-        for band in ["alpha", "beta", "theta", "ab_ratio", "bt_ratio"]:
-            self.session_band_data[band].append(round(current_metrics[band], 3))
-        
-        # Store timestamps
-        self.session_timestamps.append(time.time())
-        
-        # Store EEG data (downsampled)
-        if eeg_window.shape[1] >= self.nfft:
-            samples_to_store = int(self.sampling_rate * 1)  # 1 second
-            data_to_store = eeg_window[:, -samples_to_store::4]  # Downsample by 4
-            self.session_eeg_data.append(data_to_store.tolist())
-    
-    def _clear_session_data(self):
-        """Clear session data storage"""
-        self.session_band_data = {
-            "alpha": [],
-            "beta": [],
-            "theta": [],
-            "ab_ratio": [],
-            "bt_ratio": []
-        }
-        self.session_eeg_data = []
-        self.session_timestamps = []
     
     @QtCore.pyqtSlot()
     def cleanup(self):
