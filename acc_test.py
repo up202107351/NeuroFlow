@@ -11,6 +11,7 @@ import os
 import datetime
 from pathlib import Path
 import json
+import pandas as pd
 
 # Configuration to match main GUI
 EXPECTED_ACC_RATE = 52.0  # Match main GUI expected rate
@@ -358,6 +359,7 @@ class LatencyTestWindow(QtWidgets.QMainWindow):
         self.movement_detected = False
         self.detection_time = None
         self.countdown_timer = None
+        self.countdown_value = 0
 
     def setup_ui(self):
         """Set up the enhanced user interface"""
@@ -500,7 +502,7 @@ class LatencyTestWindow(QtWidgets.QMainWindow):
             self.connection_status.setStyleSheet("color: orange; font-weight: bold")
             QtWidgets.QApplication.processEvents()
             
-            # Updated to match main GUI approach
+            # Updated to match main GUI approach exactly
             print("Looking for accelerometer stream...")
             streams = pylsl.resolve_byprop('type', STREAM_TYPE, 1, timeout=3.0)
             
@@ -511,7 +513,7 @@ class LatencyTestWindow(QtWidgets.QMainWindow):
                                           "No accelerometer stream found. Make sure Muse is streaming data.")
                 return
                 
-            # Create an inlet from the first stream
+            # Create an inlet from the first stream - matching main GUI
             self.acc_inlet = pylsl.StreamInlet(streams[0], max_chunklen=128)
             
             # Get stream info
@@ -649,12 +651,466 @@ class LatencyTestWindow(QtWidgets.QMainWindow):
         
     def start_countdown(self, seconds):
         """Start countdown timer before prompting for movement"""
-        self.countdown_display.setText(str(seconds))
+        self.countdown_value = seconds
+        self.countdown_display.setText(str(self.countdown_value))
         
         self.trial_running = True
         
         # Create countdown timer
         self.countdown_timer = QtCore.QTimer()
-        remaining_time = seconds
+        self.countdown_timer.timeout.connect(self.update_countdown)
+        self.countdown_timer.start(1000)  # Update every second
         
-        def update_countdown():
+    def update_countdown(self):
+        """Update countdown display"""
+        self.countdown_value -= 1
+        
+        if self.countdown_value > 0:
+            self.countdown_display.setText(str(self.countdown_value))
+        else:
+            # Countdown finished - show movement prompt
+            self.countdown_timer.stop()
+            self.show_movement_prompt()
+    
+    def show_movement_prompt(self):
+        """Show the movement prompt and start timing"""
+        # Record the time the prompt was shown
+        self.movement_request_time = time.time()
+        
+        # Update display
+        self.countdown_display.setText("MOVE NOW!")
+        self.countdown_display.setStyleSheet("color: red; font-weight: bold;")
+        
+        # Add marker to plot
+        self.plot_widget.add_prompt_marker()
+        
+        # Get movement type and update instruction
+        movement_type = self.movement_combo.currentText()
+        self.instruction_label.setText(f">>> {movement_type.upper()} NOW! <<<")
+        self.instruction_label.setStyleSheet(
+            "color: red; font-weight: bold; font-size: 20px; "
+            "margin: 20px 0; padding: 20px; background-color: #ffe0e0; border-radius: 10px;"
+        )
+        
+        # Set timeout for trial (10 seconds)
+        QtCore.QTimer.singleShot(10000, self.trial_timeout)
+    
+    def trial_timeout(self):
+        """Handle trial timeout if no movement detected"""
+        if self.trial_running and not self.movement_detected:
+            # Trial failed - no movement detected
+            latency = -1  # Indicate failed trial
+            magnitude = 0
+            confidence = 0
+            
+            # Record failed trial
+            trial_data = {
+                'trial': self.current_trial,
+                'latency_ms': latency,
+                'magnitude': magnitude,
+                'confidence': confidence,
+                'success': False,
+                'timeout': True,
+                'movement_type': self.movement_combo.currentText()
+            }
+            
+            self.trial_results.append(trial_data)
+            self.session_data['trials'].append(trial_data)
+            
+            # Update results table
+            self.add_result_to_table(self.current_trial, "TIMEOUT", magnitude, confidence)
+            
+            # Reset display
+            self.reset_trial_display()
+            
+            # Start next trial
+            QtCore.QTimer.singleShot(2000, self.start_trial)
+    
+    def process_acc_data(self):
+        """Process accelerometer data from LSL - updated to match main GUI approach"""
+        if not self.acc_inlet or not self.connected:
+            return
+            
+        try:
+            # Pull data chunk - matching main GUI approach
+            chunk, timestamps = self.acc_inlet.pull_chunk(timeout=0.1, max_samples=32)
+            
+            if chunk and len(chunk) > 0:
+                chunk_np = np.array(chunk, dtype=np.float64).T
+                
+                # Process each sample in the chunk
+                for i in range(chunk_np.shape[1]):
+                    if chunk_np.shape[0] >= 3:  # Ensure we have X, Y, Z data
+                        acc_sample = chunk_np[0:3, i]  # X, Y, Z
+                        timestamp = timestamps[i]
+                        
+                        # Update plot
+                        baseline_mean = self.movement_detector.baseline_mean if self.movement_detector.baseline_calculated else None
+                        self.plot_widget.update_plot(
+                            acc_sample[0], acc_sample[1], acc_sample[2], 
+                            baseline_mean, self.movement_detector.threshold
+                        )
+                        
+                        # Check for movement during trial
+                        if self.trial_running and self.movement_request_time:
+                            movement_detected, magnitude, lsl_timestamp, confidence = self.movement_detector.update(acc_sample, timestamp)
+                            
+                            if movement_detected and not self.movement_detected:
+                                # Movement detected!
+                                self.movement_detected = True
+                                self.detection_time = time.time()
+                                
+                                # Calculate latency
+                                latency_ms = (self.detection_time - self.movement_request_time) * 1000
+                                
+                                # Record successful trial
+                                trial_data = {
+                                    'trial': self.current_trial,
+                                    'latency_ms': latency_ms,
+                                    'magnitude': magnitude,
+                                    'confidence': confidence,
+                                    'success': True,
+                                    'timeout': False,
+                                    'movement_type': self.movement_combo.currentText(),
+                                    'lsl_timestamp': lsl_timestamp,
+                                    'detection_timestamp': self.detection_time,
+                                    'prompt_timestamp': self.movement_request_time
+                                }
+                                
+                                self.trial_results.append(trial_data)
+                                self.session_data['trials'].append(trial_data)
+                                
+                                # Update UI
+                                self.add_result_to_table(self.current_trial, f"{latency_ms:.1f}", magnitude, confidence)
+                                self.plot_widget.add_detection_marker()
+                                
+                                # Show success message
+                                self.countdown_display.setText("DETECTED!")
+                                self.countdown_display.setStyleSheet("color: green; font-weight: bold;")
+                                self.instruction_label.setText(f"Movement detected! Latency: {latency_ms:.1f} ms")
+                                self.instruction_label.setStyleSheet(
+                                    "color: green; font-weight: bold; font-size: 16px; "
+                                    "margin: 20px 0; padding: 20px; background-color: #e0ffe0; border-radius: 10px;"
+                                )
+                                
+                                # End trial
+                                self.trial_running = False
+                                
+                                # Start next trial after delay
+                                QtCore.QTimer.singleShot(2000, self.start_trial)
+                        else:
+                            # Not in trial, just update detector for baseline
+                            self.movement_detector.update(acc_sample, timestamp)
+                            
+        except Exception as e:
+            print(f"Error processing accelerometer data: {e}")
+    
+    def add_result_to_table(self, trial, latency, magnitude, confidence):
+        """Add a result to the results table"""
+        row = self.results_table.rowCount()
+        self.results_table.insertRow(row)
+        
+        self.results_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(trial)))
+        self.results_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(latency)))
+        self.results_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{magnitude:.2f}"))
+        self.results_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{confidence:.2f}"))
+        
+        # Update statistics
+        self.update_statistics_display()
+    
+    def update_statistics_display(self):
+        """Update the statistics display"""
+        if not self.trial_results:
+            return
+            
+        # Calculate successful trials only
+        successful_trials = [t for t in self.trial_results if t['success']]
+        
+        if successful_trials:
+            latencies = [t['latency_ms'] for t in successful_trials]
+            avg_latency = np.mean(latencies)
+            std_latency = np.std(latencies)
+            
+            self.avg_latency_label.setText(f"Average Latency: {avg_latency:.1f} ms")
+            self.std_dev_label.setText(f"Std Dev: {std_latency:.1f} ms")
+        else:
+            self.avg_latency_label.setText("Average Latency: N/A")
+            self.std_dev_label.setText("Std Dev: N/A")
+        
+        # Success rate
+        success_rate = len(successful_trials) / len(self.trial_results) * 100
+        self.success_rate_label.setText(f"Success Rate: {success_rate:.1f}%")
+    
+    def reset_trial_display(self):
+        """Reset trial display elements"""
+        self.countdown_display.setText("")
+        self.countdown_display.setStyleSheet("")
+        self.instruction_label.setText("Get ready for next trial...")
+        self.instruction_label.setStyleSheet(
+            "font-size: 16px; margin: 20px 0; padding: 20px; "
+            "background-color: #f0f0f0; border-radius: 10px;"
+        )
+        self.trial_running = False
+    
+    def finish_test(self):
+        """Finish the latency test and show results"""
+        self.test_running = False
+        self.session_data['end_time'] = datetime.datetime.now().isoformat()
+        self.session_data['detector_stats'] = self.movement_detector.get_stats()
+        
+        # Update UI
+        self.start_button.setEnabled(True)
+        self.reset_button.setEnabled(True)
+        self.connect_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        
+        # Show completion message
+        successful_trials = [t for t in self.trial_results if t['success']]
+        success_rate = len(successful_trials) / len(self.trial_results) * 100
+        
+        if successful_trials:
+            latencies = [t['latency_ms'] for t in successful_trials]
+            avg_latency = np.mean(latencies)
+            std_latency = np.std(latencies)
+            
+            completion_msg = (
+                f"Latency Test Complete!\n\n"
+                f"Successful Trials: {len(successful_trials)}/{len(self.trial_results)}\n"
+                f"Success Rate: {success_rate:.1f}%\n"
+                f"Average Latency: {avg_latency:.1f} ± {std_latency:.1f} ms"
+            )
+        else:
+            completion_msg = (
+                f"Latency Test Complete!\n\n"
+                f"No successful trials detected.\n"
+                f"Try adjusting the movement threshold or movement type."
+            )
+        
+        self.instruction_label.setText(completion_msg)
+        self.instruction_label.setStyleSheet(
+            "color: blue; font-weight: bold; font-size: 16px; "
+            "margin: 20px 0; padding: 20px; background-color: #e0e0ff; border-radius: 10px;"
+        )
+        self.countdown_display.setText("COMPLETE")
+        self.countdown_display.setStyleSheet("color: blue; font-weight: bold;")
+        
+        print(f"Latency test completed. {len(successful_trials)}/{len(self.trial_results)} successful trials.")
+    
+    def reset_test(self):
+        """Reset the test"""
+        self.test_running = False
+        self.trial_running = False
+        self.current_trial = 0
+        self.trial_results = []
+        self.movement_detected = False
+        self.detection_time = None
+        self.movement_request_time = None
+        
+        # Stop any running timers
+        if self.countdown_timer and self.countdown_timer.isActive():
+            self.countdown_timer.stop()
+        
+        # Clear UI
+        self.results_table.setRowCount(0)
+        self.update_statistics_display()
+        self.countdown_display.setText("")
+        self.countdown_display.setStyleSheet("")
+        self.instruction_label.setText("Ready to start latency test.\n\nYou will be asked to move your head when prompted.")
+        self.instruction_label.setStyleSheet(
+            "font-size: 16px; margin: 20px 0; padding: 20px; "
+            "background-color: #f0f0f0; border-radius: 10px;"
+        )
+        
+        # Clear plot markers
+        self.plot_widget.clear_markers()
+        
+        # Reset detector
+        if hasattr(self, 'movement_detector'):
+            self.movement_detector.reset_baseline()
+            self.baseline_status.setText("Baseline: Not Calculated")
+            self.baseline_status.setStyleSheet("")
+        
+        # Enable buttons
+        self.start_button.setEnabled(True)
+        self.reset_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+    
+    def save_results(self):
+        """Save the enhanced latency test results with organized folder structure"""
+        if not self.trial_results:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No test results to save.")
+            return
+        
+        try:
+            # Create timestamped filename - matching main GUI approach
+            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename_base = f"latency_test_{timestamp_str}"
+            
+            # Create organized folder structure
+            test_dir = self.output_dir / timestamp_str
+            test_dir.mkdir(exist_ok=True)
+            
+            # Save detailed results as CSV
+            csv_path = test_dir / f"{filename_base}.csv"
+            df = pd.DataFrame(self.trial_results)
+            df.to_csv(csv_path, index=False)
+            
+            # Save session metadata as JSON
+            json_path = test_dir / f"{filename_base}_metadata.json"
+            with open(json_path, 'w') as f:
+                json.dump(self.session_data, f, indent=2, default=str)
+            
+            # Generate summary statistics
+            successful_trials = [t for t in self.trial_results if t['success']]
+            summary = {
+                'total_trials': len(self.trial_results),
+                'successful_trials': len(successful_trials),
+                'success_rate_percent': len(successful_trials) / len(self.trial_results) * 100,
+                'average_latency_ms': np.mean([t['latency_ms'] for t in successful_trials]) if successful_trials else None,
+                'std_dev_latency_ms': np.std([t['latency_ms'] for t in successful_trials]) if successful_trials else None,
+                'min_latency_ms': min([t['latency_ms'] for t in successful_trials]) if successful_trials else None,
+                'max_latency_ms': max([t['latency_ms'] for t in successful_trials]) if successful_trials else None,
+                'movement_threshold': self.movement_detector.threshold,
+                'sampling_rate_hz': self.actual_sampling_rate,
+                'test_date': datetime.datetime.now().isoformat()
+            }
+            
+            # Save summary
+            summary_path = test_dir / f"{filename_base}_summary.json"
+            with open(summary_path, 'w') as f:
+                json.dump(summary, f, indent=2)
+            
+            # Generate plots if successful trials exist
+            if successful_trials:
+                self.generate_analysis_plots(test_dir, filename_base)
+            
+            # Show success message
+            success_msg = f"""Results saved successfully!
+
+Files created in: {test_dir}
+
+• Detailed results: {csv_path.name}
+• Session metadata: {json_path.name}  
+• Summary statistics: {summary_path.name}
+• Analysis plots: {len(successful_trials) > 0}
+
+Summary:
+• Total trials: {len(self.trial_results)}
+• Successful: {len(successful_trials)} ({len(successful_trials)/len(self.trial_results)*100:.1f}%)
+• Average latency: {np.mean([t['latency_ms'] for t in successful_trials]):.1f} ms (±{np.std([t['latency_ms'] for t in successful_trials]):.1f})
+• Sampling rate: {self.actual_sampling_rate} Hz"""
+            
+            QtWidgets.QMessageBox.information(self, "Save Complete", success_msg)
+            print(f"Latency test results saved to: {test_dir}")
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save Error", f"Error saving results: {str(e)}")
+            print(f"Error saving results: {e}")
+    
+    def generate_analysis_plots(self, output_dir, filename_base):
+        """Generate analysis plots for the latency test results"""
+        try:
+            successful_trials = [t for t in self.trial_results if t['success']]
+            if not successful_trials:
+                return
+            
+            # Create figure with subplots
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle(f'Accelerometer Latency Test Analysis - {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}', fontsize=14)
+            
+            # Plot 1: Latency over trials
+            trial_nums = [t['trial'] for t in successful_trials]
+            latencies = [t['latency_ms'] for t in successful_trials]
+            
+            axes[0,0].plot(trial_nums, latencies, 'bo-', markersize=6, linewidth=2)
+            axes[0,0].set_xlabel('Trial Number')
+            axes[0,0].set_ylabel('Latency (ms)')
+            axes[0,0].set_title('Latency vs Trial Number')
+            axes[0,0].grid(True, alpha=0.3)
+            
+            # Add average line
+            avg_latency = np.mean(latencies)
+            axes[0,0].axhline(avg_latency, color='r', linestyle='--', alpha=0.7, label=f'Average: {avg_latency:.1f} ms')
+            axes[0,0].legend()
+            
+            # Plot 2: Latency histogram
+            axes[0,1].hist(latencies, bins=max(5, len(latencies)//3), alpha=0.7, color='skyblue', edgecolor='black')
+            axes[0,1].set_xlabel('Latency (ms)')
+            axes[0,1].set_ylabel('Frequency')
+            axes[0,1].set_title('Latency Distribution')
+            axes[0,1].axvline(avg_latency, color='r', linestyle='--', alpha=0.7, label=f'Average: {avg_latency:.1f} ms')
+            axes[0,1].legend()
+            
+            # Plot 3: Magnitude vs Confidence
+            magnitudes = [t['magnitude'] for t in successful_trials]
+            confidences = [t['confidence'] for t in successful_trials]
+            
+            scatter = axes[1,0].scatter(magnitudes, confidences, c=latencies, cmap='viridis', s=60, alpha=0.7)
+            axes[1,0].set_xlabel('Movement Magnitude')
+            axes[1,0].set_ylabel('Detection Confidence')
+            axes[1,0].set_title('Magnitude vs Confidence (colored by latency)')
+            cbar = plt.colorbar(scatter, ax=axes[1,0])
+            cbar.set_label('Latency (ms)')
+            
+            # Plot 4: Summary statistics
+            axes[1,1].axis('off')
+            
+            # Calculate detailed statistics
+            stats_text = f"""Test Summary Statistics
+            
+Total Trials: {len(self.trial_results)}
+Successful: {len(successful_trials)} ({len(successful_trials)/len(self.trial_results)*100:.1f}%)
+
+Latency Statistics:
+• Mean: {np.mean(latencies):.1f} ms
+• Std Dev: {np.std(latencies):.1f} ms
+• Min: {min(latencies):.1f} ms
+• Max: {max(latencies):.1f} ms
+• Median: {np.median(latencies):.1f} ms
+
+Detection Parameters:
+• Movement Threshold: {self.movement_detector.threshold:.1f}
+• Sampling Rate: {self.actual_sampling_rate} Hz
+• Movement Type: {self.movement_combo.currentText()}
+
+System Info:
+• Expected Rate: {EXPECTED_ACC_RATE} Hz
+• Actual Rate: {self.actual_sampling_rate} Hz
+• Stream Type: {STREAM_TYPE}"""
+            
+            axes[1,1].text(0.05, 0.95, stats_text, transform=axes[1,1].transAxes, 
+                          fontsize=10, verticalalignment='top', fontfamily='monospace',
+                          bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
+            
+            plt.tight_layout()
+            
+            # Save plot
+            plot_path = output_dir / f"{filename_base}_analysis.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"Analysis plot saved: {plot_path}")
+            
+        except Exception as e:
+            print(f"Error generating analysis plots: {e}")
+
+
+def main():
+    """Main entry point for the enhanced latency test application"""
+    app = QtWidgets.QApplication(sys.argv)
+    
+    # Set application properties
+    app.setApplicationName("Muse Accelerometer Latency Test")
+    app.setApplicationVersion("2.0")
+    app.setOrganizationName("NeuroFlow")
+    
+    # Create and show the main window
+    window = LatencyTestWindow()
+    window.show()
+    
+    # Run the application
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
