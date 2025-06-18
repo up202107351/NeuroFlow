@@ -203,7 +203,7 @@ class HybridEEGClassifier:
             logger.error(f"Error extracting classifier features: {e}")
             raise
     
-    def classify_mental_state(self, current_metrics, use_classifier=True):
+    def classify_mental_state(self, current_metrics, use_classifier=True,  session_type=None):
         """
         Hybrid classification with detailed logging to debug issues
         """
@@ -268,7 +268,8 @@ class HybridEEGClassifier:
             theta_ratio, 
             bt_ratio,
             ab_ratio,
-            classifier_confidence
+            classifier_confidence, 
+            session_type
         )
         
         # DEBUG: Log final classification results
@@ -592,120 +593,220 @@ class HybridEEGClassifier:
         else:
             return "neutral"
     
-    def _determine_level(self, predicted_class, alpha_ratio, beta_ratio, theta_ratio, bt_ratio, ab_ratio, classifier_confidence):
-        """Determine specific level based on predicted class and band power ratios"""
+    def _determine_level(self, predicted_class, alpha_ratio, beta_ratio, theta_ratio, bt_ratio, ab_ratio, classifier_confidence, session_type=None):
+        """
+        Determine specific level based on predicted class and band power ratios relative to baseline.
+        Uses classifier confidence to adjust thresholds and adapt state determination.
+        
+        Args:
+            predicted_class: The class predicted by the ML model (e.g., "relaxed", "concentrating", etc.)
+            alpha_ratio: Current alpha power relative to baseline
+            beta_ratio: Current beta power relative to baseline  
+            theta_ratio: Current theta power relative to baseline
+            bt_ratio: Beta/theta ratio relative to baseline
+            ab_ratio: Alpha/beta ratio relative to baseline
+            classifier_confidence: Confidence score from the classifier
+            session_type: Type of session (RELAXATION or FOCUS)
+            
+        Returns:
+            Tuple of (state, level, confidence, smooth_value)
+        """
         # Default values
         state = "Neutral"
         level = 0
         confidence = classifier_confidence
         smooth_value = 0.5
         
-        # Relaxation levels
-        if predicted_class == "relaxed":
-            thresholds = self.level_thresholds["relaxed"]
-            
-            # Level 3: Deeply Relaxed
-            if (alpha_ratio > thresholds["alpha_ratio"][2] and 
-                beta_ratio < thresholds["beta_ratio_max"][2]):
-                state = "Deeply Relaxed"
-                level = 3
-                confidence = min(0.95, classifier_confidence + 0.1)
-                smooth_value = 0.9
-                
-            # Level 2: Relaxed
-            elif (alpha_ratio > thresholds["alpha_ratio"][1] and 
-                 beta_ratio < thresholds["beta_ratio_max"][1]):
-                state = "Relaxed"
-                level = 2
-                confidence = min(0.9, classifier_confidence)
-                smooth_value = 0.75
-                
-            # Level 1: Slightly Relaxed
-            elif (alpha_ratio > thresholds["alpha_ratio"][0] and 
-                 beta_ratio < thresholds["beta_ratio_max"][0]):
-                state = "Slightly Relaxed"
-                level = 1
-                confidence = min(0.85, classifier_confidence - 0.05)
-                smooth_value = 0.6
-            
-            # Default relaxed case
-            else:
-                state = "Slightly Relaxed"
-                level = 1
-                confidence = min(0.8, classifier_confidence - 0.1)
-                smooth_value = 0.6
+        # Determine if we're in a relaxation or focus session
+        is_relaxation = session_type == SESSION_TYPE_RELAX if session_type else None
+        is_focus = session_type == SESSION_TYPE_FOCUS if session_type else None
         
-        # Concentration levels
-        elif predicted_class == "concentrating":
-            thresholds = self.level_thresholds["concentrating"]
-            
-            # Level 3: Highly Focused
-            if (beta_ratio > thresholds["beta_ratio"][2] and 
-                bt_ratio > thresholds["bt_ratio"][2]):
-                state = "Highly Focused"
-                level = 3
-                confidence = min(0.95, classifier_confidence + 0.1)
-                smooth_value = 0.9
-                
-            # Level 2: Focused
-            elif (beta_ratio > thresholds["beta_ratio"][1] and 
-                 bt_ratio > thresholds["bt_ratio"][1]):
-                state = "Focused"
-                level = 2
-                confidence = min(0.9, classifier_confidence)
-                smooth_value = 0.75
-                
-            # Level 1: Slightly Focused
-            elif (beta_ratio > thresholds["beta_ratio"][0] and 
-                 bt_ratio > thresholds["bt_ratio"][0]):
-                state = "Slightly Focused"
-                level = 1
-                confidence = min(0.85, classifier_confidence - 0.05)
-                smooth_value = 0.6
-                
-            # Default concentration case
-            else:
-                state = "Slightly Focused"
-                level = 1
-                confidence = min(0.8, classifier_confidence - 0.1)
-                smooth_value = 0.6
+        # Weight our decisions by classifier confidence
+        # Low confidence = more conservative level determination
+        confidence_weight = min(1.0, classifier_confidence)
         
-        # Neutral with potential negative states
-        else:
-            thresholds = self.level_thresholds["negative"]
+        # Level thresholds adjusted by confidence
+        # Lower confidence = stricter thresholds for positive states
+        threshold_adj = (1 - confidence_weight) * 0.2
+        
+        alpha_high = 1.4 + threshold_adj
+        alpha_med = 1.2 + threshold_adj
+        alpha_low = 1.05 + threshold_adj
+        
+        beta_high = 1.4 + threshold_adj
+        beta_med = 1.2 + threshold_adj
+        beta_low = 1.1 + threshold_adj
+        
+        bt_high = 1.4 + threshold_adj
+        bt_med = 1.2 + threshold_adj
+        bt_low = 1.05 + threshold_adj
+        
+        # Negative state thresholds (less affected by confidence)
+        alpha_low_thresh = 0.8 - threshold_adj * 0.5
+        alpha_very_low = 0.5 - threshold_adj * 0.5
+        beta_high_thresh = 1.2 - threshold_adj * 0.5
+        beta_very_high = 1.5 - threshold_adj * 0.5
+        
+        # FIRST: Honor the classifier's prediction for the main state
+        if predicted_class == "relaxed" or predicted_class == 2:  # Relaxed state
+            # For relaxation sessions, use relaxation terminology
+            if is_relaxation or is_relaxation is None:
+                if alpha_ratio > alpha_high:
+                    state = "Deeply Relaxed"
+                    level = 3
+                    confidence = min(0.95, classifier_confidence + 0.1 * confidence_weight)
+                    smooth_value = 0.9
+                elif alpha_ratio > alpha_med:
+                    state = "Relaxed"
+                    level = 2
+                    confidence = min(0.9, classifier_confidence + 0.05 * confidence_weight)
+                    smooth_value = 0.75
+                elif alpha_ratio > alpha_low:
+                    state = "Slightly Relaxed"
+                    level = 1
+                    confidence = min(0.85, classifier_confidence)
+                    smooth_value = 0.6
+                else:
+                    state = "Slightly Relaxed"
+                    level = 1
+                    confidence = min(0.8, classifier_confidence - 0.05 * (1 - confidence_weight))
+                    smooth_value = 0.55
+            # For focus sessions, relaxation is off-target
+            elif is_focus:
+                if alpha_ratio > alpha_high:
+                    state = "Too Relaxed"
+                    level = -2
+                    confidence = min(0.9, classifier_confidence)
+                    smooth_value = 0.2
+                elif alpha_ratio > alpha_med:
+                    state = "Relaxed"
+                    level = -1
+                    confidence = min(0.85, classifier_confidence)
+                    smooth_value = 0.35
+                else:
+                    state = "Slightly Relaxed"
+                    level = -1
+                    confidence = min(0.8, classifier_confidence)
+                    smooth_value = 0.4
+                    
+        elif predicted_class == "concentrating" or predicted_class == 1:  # Concentrated/focused state
+            # For focus sessions, use focus terminology
+            if is_focus or is_relaxation is None:
+                if beta_ratio > beta_high and bt_ratio > bt_high:
+                    state = "Highly Focused"
+                    level = 3
+                    confidence = min(0.95, classifier_confidence + 0.1 * confidence_weight)
+                    smooth_value = 0.9
+                elif beta_ratio > beta_med and bt_ratio > bt_med:
+                    state = "Focused"
+                    level = 2
+                    confidence = min(0.9, classifier_confidence + 0.05 * confidence_weight)
+                    smooth_value = 0.75
+                elif beta_ratio > beta_low and bt_ratio > bt_low:
+                    state = "Slightly Focused"
+                    level = 1
+                    confidence = min(0.85, classifier_confidence)
+                    smooth_value = 0.6
+                else:
+                    state = "Attentive"
+                    level = 1
+                    confidence = min(0.8, classifier_confidence - 0.05 * (1 - confidence_weight))
+                    smooth_value = 0.55
+            # For relaxation sessions, concentration could be tense/alert
+            elif is_relaxation:
+                if beta_ratio > beta_high and bt_ratio > bt_high:
+                    state = "Alert"
+                    level = -2
+                    confidence = min(0.9, classifier_confidence)
+                    smooth_value = 0.2
+                elif beta_ratio > beta_med:
+                    state = "Slightly Alert"
+                    level = -1
+                    confidence = min(0.85, classifier_confidence)
+                    smooth_value = 0.35
+                else:
+                    state = "Attentive"
+                    level = 0
+                    confidence = min(0.8, classifier_confidence)
+                    smooth_value = 0.45
+                    
+        elif predicted_class == "neutral" or predicted_class == 0:  # Neutral state
+            # Neutral is neutral regardless of session type
+            state = "Neutral"
+            level = 0
+            confidence = classifier_confidence
+            smooth_value = 0.5
             
-            # Check for tension (low alpha, high beta)
-            if alpha_ratio < thresholds["alpha_ratio"][1] and beta_ratio > 1.2:
-                state = "Tense"
-                level = -2
-                confidence = min(0.85, classifier_confidence - 0.05)
-                smooth_value = 0.2
-                
-            elif alpha_ratio < thresholds["alpha_ratio"][0] and beta_ratio > 1.1:
-                state = "Slightly Tense"
-                level = -1
-                confidence = min(0.8, classifier_confidence - 0.1)
-                smooth_value = 0.35
+        # SECOND: Check for negative states based on ratios - these can override classifier predictions
+        # when patterns are very strong, but are weighted by classifier confidence
+        
+        # Very low alpha + high beta could indicate tension regardless of classifier
+        if alpha_ratio < alpha_very_low and beta_ratio > beta_very_high:
+            override_confidence = 0.9 - (confidence_weight * 0.2)  # Lower override confidence if classifier is confident
             
-            # Check for distraction (low beta/theta ratio, high theta)
-            elif bt_ratio < thresholds["bt_ratio"][1] and theta_ratio > 1.2:
-                state = "Distracted"
-                level = -2
-                confidence = min(0.85, classifier_confidence - 0.05)
-                smooth_value = 0.2
+            if override_confidence > classifier_confidence:  # Only override if more confident than classifier
+                if is_relaxation:
+                    state = "Tense"
+                    level = -3
+                    confidence = override_confidence
+                    smooth_value = 0.1
+                elif is_focus:
+                    state = "Overthinking"
+                    level = -2
+                    confidence = override_confidence
+                    smooth_value = 0.25
+                else:
+                    state = "Tense"
+                    level = -2
+                    confidence = override_confidence
+                    smooth_value = 0.2
                 
-            elif bt_ratio < thresholds["bt_ratio"][0] and theta_ratio > 1.1:
-                state = "Slightly Distracted"
-                level = -1
-                confidence = min(0.8, classifier_confidence - 0.1)
-                smooth_value = 0.35
-                
-            # Default neutral case
-            else:
-                state = "Neutral"
-                level = 0
-                confidence = min(0.7, classifier_confidence)
-                smooth_value = 0.5
+        # High theta + low beta could indicate distraction/drowsiness
+        elif theta_ratio > 1.5 and beta_ratio < 0.8:
+            override_confidence = 0.85 - (confidence_weight * 0.2)
+            
+            if override_confidence > classifier_confidence:
+                if is_relaxation:
+                    state = "Drowsy"
+                    level = 1  # Actually good for relaxation
+                    confidence = override_confidence
+                    smooth_value = 0.65
+                elif is_focus:
+                    state = "Distracted"
+                    level = -2
+                    confidence = override_confidence
+                    smooth_value = 0.25
+                else:
+                    state = "Drowsy"
+                    level = -1
+                    confidence = override_confidence
+                    smooth_value = 0.4
+                    
+        # High alpha + low beta could indicate deep relaxation
+        elif alpha_ratio > 1.6 and beta_ratio < 0.7:
+            override_confidence = 0.9 - (confidence_weight * 0.2)
+            
+            if override_confidence > classifier_confidence:
+                if is_relaxation:
+                    state = "Deeply Relaxed"
+                    level = 3
+                    confidence = override_confidence
+                    smooth_value = 0.9
+                elif is_focus:
+                    state = "Too Relaxed" 
+                    level = -2
+                    confidence = override_confidence
+                    smooth_value = 0.2
+                else:
+                    state = "Deeply Relaxed"
+                    level = 2
+                    confidence = override_confidence
+                    smooth_value = 0.8
+        
+        # Debug output
+        logger.debug(f"SESSION TYPE: {session_type}, PREDICTION: {predicted_class}, CONFIDENCE: {classifier_confidence:.2f}")
+        logger.debug(f"RATIOS - alpha: {alpha_ratio:.2f}, beta: {beta_ratio:.2f}, theta: {theta_ratio:.2f}, bt: {bt_ratio:.2f}")
+        logger.debug(f"DETERMINED: {state} (level={level}), confidence={confidence:.2f}, value={smooth_value:.2f}")
         
         return state, level, confidence, smooth_value
     
@@ -1433,7 +1534,11 @@ class EEGProcessingWorker(QtCore.QObject):
                         self.recent_metrics_history.pop(0)
                     
                     # Use hybrid classifier instead of simple classification
-                    hybrid_classification = self.hybrid_classifier.classify_mental_state(current_metrics)
+                    hybrid_classification = self.hybrid_classifier.classify_mental_state(
+                        current_metrics, 
+                        use_classifier=True,
+                        session_type=self.current_session_type
+                    )
                     
                     # Apply prediction smoothing
                     smoothed_classification = self._apply_prediction_smoothing(
@@ -1745,65 +1850,87 @@ class EEGProcessingWorker(QtCore.QObject):
         return amplitude_mask & diff_mask
     
     def _apply_prediction_smoothing(self, raw_state, raw_level, confidence, raw_value):
-        """Apply smoothing and stability requirements to predictions with debugging"""
+        """Apply smoothing and stability requirements with momentum for realistic brain-like transitions"""
         # Get previous smoothed value
         if self.prediction_history:
             prev_smooth_value = self.prediction_history[-1]['smooth_value']
             prev_state = self.prediction_history[-1]['state']
             prev_level = self.prediction_history[-1]['level']
-            
-            # DEBUG: Log previous state
-            logger.debug(f"PREV STATE: {prev_state}, Level={prev_level}, Value={prev_smooth_value:.2f}")
         else:
             prev_smooth_value = 0.5
             prev_state = "Unknown"
             prev_level = 0
-            logger.debug("No previous state (first prediction)")
         
-        # Apply exponential smoothing
-        smoothing_factor = 0.3 if confidence > 0.8 else 0.1  # Faster smoothing for high confidence
-        smooth_value = smoothing_factor * raw_value + (1 - smoothing_factor) * prev_smooth_value
+        # Apply exponential smoothing with momentum (physics-based)
+        # This creates more realistic, gradual transitions
         
-        # DEBUG: Log smoothed value
-        logger.debug(f"SMOOTHING: Factor={smoothing_factor:.2f}, Raw={raw_value:.2f}, Prev={prev_smooth_value:.2f}, Result={smooth_value:.2f}")
+        # 1. For the smooth_value (continuous measure)
+        target_value = raw_value
+        current_value = prev_smooth_value
         
-        # Determine if we should change the displayed state
-        level_change = abs(raw_level - prev_level)
-        logger.debug(f"LEVEL CHANGE: {level_change} (threshold={self.state_change_threshold})")
+        # Physics-based smoothing with momentum
+        # Calculate "force" based on distance to target
+        force = (target_value - current_value) * (1.0 - self.state_momentum)
         
-        # Check stability requirements
-        stability_check = (confidence >= self.min_confidence_for_change and level_change >= self.state_change_threshold)
-        logger.debug(f"STABILITY CHECK: {stability_check} (confidence={confidence:.2f} >= {self.min_confidence_for_change}, level_change={level_change} >= {self.state_change_threshold})")
+        # Update velocity with momentum
+        self.state_velocity = self.state_velocity * self.state_momentum + force
         
-        if stability_check:
-            # Check if this is consistent with recent predictions
-            if self.last_stable_prediction == raw_state:
-                self.stable_prediction_count += 1
-                logger.debug(f"CONSISTENT PREDICTION: {raw_state} (count={self.stable_prediction_count}/{self.min_stable_count})")
-            else:
-                self.last_stable_prediction = raw_state
-                self.stable_prediction_count = 1
-                logger.debug(f"NEW STABLE PREDICTION: {raw_state} (count reset to 1/{self.min_stable_count})")
+        # Apply velocity to position (smooth_value)
+        smooth_value = current_value + self.state_velocity
+        
+        # Clamp to valid range
+        smooth_value = max(0.0, min(1.0, smooth_value))
+        
+        # 2. For level transitions, need discrete but smooth behavior
+        level_diff = raw_level - prev_level
+        
+        # Only allow level changes when confidence is sufficient and change is significant
+        if abs(level_diff) >= self.state_change_threshold and confidence >= self.min_confidence_for_change:
+            # Update level velocity using momentum
+            self.level_velocity = self.level_velocity * self.level_momentum + level_diff * (1.0 - self.level_momentum)
             
-            # Only change state if we have enough consistent predictions
-            if self.stable_prediction_count >= self.min_stable_count:
-                final_state = raw_state
-                final_level = raw_level
-                final_confidence = confidence
-                logger.debug(f"STATE CHANGE ACCEPTED: {raw_state} (count={self.stable_prediction_count} >= {self.min_stable_count})")
+            # Only change level when velocity exceeds threshold
+            if abs(self.level_velocity) >= 0.5:
+                # Direction of change
+                level_step = 1 if self.level_velocity > 0 else -1
+                
+                # Apply step change to level (constrained)
+                final_level = prev_level + level_step
+                
+                # Reset velocity partially after change
+                self.level_velocity *= 0.5
+                
+                # If this is a new state type altogether, check for consistency
+                if raw_state != prev_state:
+                    if self.last_stable_prediction == raw_state:
+                        self.stable_prediction_count += 1
+                    else:
+                        self.last_stable_prediction = raw_state
+                        self.stable_prediction_count = 1
+                    
+                    # Only change state type if we have consistent predictions
+                    if self.stable_prediction_count >= self.min_stable_count:
+                        final_state = raw_state
+                        final_confidence = confidence
+                    else:
+                        final_state = prev_state
+                        final_confidence = confidence * 0.7
+                else:
+                    # Same state type, just different level
+                    final_state = raw_state
+                    final_confidence = confidence
             else:
-                # Keep previous state but update smooth_value
+                # Not enough momentum for level change
                 final_state = prev_state
                 final_level = prev_level
-                final_confidence = confidence * 0.7  # Reduce confidence during transition
-                logger.debug(f"STATE CHANGE PENDING: Need {self.min_stable_count - self.stable_prediction_count} more consistent predictions")
+                final_confidence = confidence * 0.8
         else:
-            # Not confident enough or change too small - keep previous state
+            # No significant change
             final_state = prev_state
             final_level = prev_level
             final_confidence = confidence * 0.8
-            logger.debug(f"STATE CHANGE REJECTED: Confidence or level change too low")
         
+        # Create final prediction
         prediction = {
             "state": final_state,
             "state_key": final_state.lower().replace(' ', '_'),
@@ -1821,7 +1948,6 @@ class EEGProcessingWorker(QtCore.QObject):
         if len(self.prediction_history) > self.prediction_smoothing_window:
             self.prediction_history.pop(0)
         
-        logger.debug(f"FINAL RESULT: State={final_state}, Level={final_level}, Confidence={final_confidence:.2f}")
         return prediction
 
     @QtCore.pyqtSlot()
