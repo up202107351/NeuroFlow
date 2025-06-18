@@ -30,6 +30,8 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
 import xgboost as xgb
 from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -897,7 +899,7 @@ class CompleteEEGClassifierWithF1:
         
         return session_results
     
-    def create_f1_analysis_plots(self, session_results: Dict):
+    def create_f1_analysis_plots(self, session_results: Dict, save_path=None):
         """
         Create comprehensive F1-score analysis plots
         """
@@ -1157,7 +1159,15 @@ class CompleteEEGClassifierWithF1:
             ax.set_title('Performance Summary\n(Window vs Session Level + Precision/Recall)')
         
         plt.tight_layout()
-        plt.savefig('comprehensive_f1_analysis.png', dpi=150, bbox_inches='tight')
+        # Use provided save path or default
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved: {save_path}")
+        else:
+            default_path = os.path.join(self.results_dir, 'comprehensive_f1_analysis.png')
+            plt.savefig(default_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved: {default_path}")
+            
         plt.close()
         
         print("  Saved: comprehensive_f1_analysis.png")
@@ -1241,6 +1251,10 @@ def main():
     # Set data path
     data_path = r"C:\Users\berna\OneDrive\Documentos\4A 2S\Neuro\Projeto Antigo\Dataset"
     
+    # Create results directory
+    results_dir = "dataset_results"
+    os.makedirs(results_dir, exist_ok=True)
+    
     try:
         # Initialize classifier
         print("Initializing classifier...")
@@ -1265,8 +1279,9 @@ def main():
         # Print detailed F1 results
         classifier.print_detailed_f1_results(session_results)
         
-        # Create F1 analysis plots
-        classifier.create_f1_analysis_plots(session_results)
+        # Create F1 analysis plots and save to results directory
+        plot_path = os.path.join(results_dir, 'comprehensive_f1_analysis.png')
+        classifier.create_f1_analysis_plots(session_results, save_path=plot_path)
         
         # Print final summary
         print("\n" + "=" * 65)
@@ -1293,6 +1308,28 @@ def main():
                 session_acc = session_results[best_name_f1]['accuracy']
                 print(f"    Session F1-Score: {session_f1:.3f}")
                 print(f"    Session Accuracy: {session_acc:.3f}")
+            
+            # Save best classifier model
+            best_model = classifier.classifiers[best_name_f1]['pipeline']
+            model_filename = f"{best_name_f1.replace(' ', '_').lower()}_model.joblib"
+            model_path = os.path.join(results_dir, model_filename)
+            joblib.dump(best_model, model_path)
+            print(f"\nBest classifier saved to: {model_path}")
+            
+            # Save classifier metadata
+            metadata = {
+                'classifier_name': best_name_f1,
+                'f1_macro': best_f1_score,
+                'f1_std': best_f1_std,
+                'accuracy': classifier.classifiers[best_name_f1]['mean_accuracy'],
+                'per_class_f1': cv_per_class,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'feature_names': classifier.feature_names
+            }
+            metadata_path = os.path.join(results_dir, 'classifier_metadata.json')
+            import json
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
         
         if classifier.features_df is not None:
             total_duration = sum(s['duration_seconds'] for s in classifier.sessions.values())
@@ -1301,8 +1338,11 @@ def main():
             print(f"  Total windows: {len(classifier.features_df)}")
             print(f"  Features extracted: {len(classifier.feature_names)}")
         
-        print(f"\nGenerated files:")
+        print(f"\nGenerated files in {results_dir}:")
         print(f"  - comprehensive_f1_analysis.png")
+        if classifier.classifiers:
+            print(f"  - {model_filename}")
+            print(f"  - classifier_metadata.json")
         
     except Exception as e:
         print(f"Error during analysis: {e}")
