@@ -5,6 +5,8 @@ import pylsl
 from PyQt5 import QtWidgets, QtCore, QtGui
 from collections import deque
 import random
+import matplotlib
+matplotlib.use('Qt5Agg')  # Use Qt5 backend for matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import os
@@ -19,7 +21,7 @@ STREAM_TYPE = 'Accelerometer'  # Match main GUI stream type
 LATENCY_TEST_DIR = "latency_test_data"
 
 class MovementDetector:
-    def __init__(self, window_size=0.5, threshold=1.5, min_samples=5):
+    def __init__(self, window_size=0.5, threshold=1.2, min_samples=5):
         """
         Enhanced movement detector for accelerometer data - matches main GUI approach
         
@@ -48,7 +50,7 @@ class MovementDetector:
         self.in_movement = False
         
         # Enhanced detection parameters
-        self.min_baseline_samples = int(EXPECTED_ACC_RATE * 2)  # 2 seconds of data
+        self.min_baseline_samples = int(EXPECTED_ACC_RATE * 5)  # 2 seconds of data
         
     def update(self, acc_data, timestamp):
         """
@@ -141,7 +143,7 @@ class MovementDetector:
             (movement_detected, magnitude, confidence) tuple
         """
         # Get recent samples for analysis
-        samples_to_check = min(int(EXPECTED_ACC_RATE * 0.2), 15)  # ~200ms of data
+        samples_to_check = min(int(EXPECTED_ACC_RATE * 0.5), 15)  # ~200ms of data
         recent_x = list(self.acc_buffer_x)[-samples_to_check:]
         recent_y = list(self.acc_buffer_y)[-samples_to_check:]
         recent_z = list(self.acc_buffer_z)[-samples_to_check:]
@@ -166,6 +168,9 @@ class MovementDetector:
         
         # Return True if enough samples exceed threshold
         movement_detected = exceeding_samples >= self.min_samples
+
+        # In detect_movement method, add:
+        print(f"Max magnitude: {max_magnitude:.3f}, Threshold: {self.threshold * np.mean(self.baseline_std):.3f}")
         
         return movement_detected, max_magnitude, confidence
         
@@ -209,7 +214,7 @@ class AccelerometerPlot(FigureCanvas):
         self.line_y, = ax1.plot(self.time_data, self.y_data, 'g-', alpha=0.7, label='Y', linewidth=1.5)
         self.line_z, = ax1.plot(self.time_data, self.z_data, 'b-', alpha=0.7, label='Z', linewidth=1.5)
         
-        ax1.set_ylim(-3, 3)
+        ax1.set_ylim(-1, 1)
         ax1.set_ylabel('Acceleration (g)')
         ax1.set_title('Raw Accelerometer Data')
         ax1.legend(loc='upper right')
