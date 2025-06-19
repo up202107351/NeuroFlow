@@ -240,39 +240,27 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         return option_layout
 
     def update_button_states(self, is_lsl_connected):
-        """Update button states based on connection and session status"""
+        """Update button states based on connection status"""
         is_session_active = bool(self.session_goal)
+
+        # Simplified logic: enable buttons if LSL is connected.
+        # More specific checks (session active, user logged in) are handled when the button is clicked.
+        enabled = is_lsl_connected
 
         if self.page_type == "meditation":
             # Meditation buttons
             if hasattr(self, 'btn_start_video_feedback'):
-                self.btn_start_video_feedback.setEnabled(is_lsl_connected and not is_session_active)
-                if not is_lsl_connected:
-                    self.btn_start_video_feedback.setToolTip("Muse must be connected.")
-                elif is_session_active:
-                    self.btn_start_video_feedback.setToolTip("A session is already active.")
-                else:
-                    self.btn_start_video_feedback.setToolTip("")
+                self.btn_start_video_feedback.setEnabled(enabled)
+                self.btn_start_video_feedback.setToolTip("Muse must be connected to start." if not enabled else "")
 
             if hasattr(self, 'btn_start_unity_game'):
-                self.btn_start_unity_game.setEnabled(is_lsl_connected and not is_session_active)
-                if not is_lsl_connected:
-                    self.btn_start_unity_game.setToolTip("Muse must be connected.")
-                elif is_session_active:
-                    self.btn_start_unity_game.setToolTip("A session is already active.")
-                else:
-                    self.btn_start_unity_game.setToolTip("")
+                self.btn_start_unity_game.setEnabled(enabled)
+                self.btn_start_unity_game.setToolTip("Muse must be connected to start." if not enabled else "")
         else:
             # Focus buttons
-            tooltip_text = "Requires Muse connection." if not is_lsl_connected else ""
-            user_tooltip = "You must be logged in to start a session." if not self.user_id else ""
-            
-            if tooltip_text and user_tooltip:
-                tooltip_text = f"{tooltip_text} {user_tooltip}"
-            elif user_tooltip and not tooltip_text:
-                tooltip_text = user_tooltip
-            
-            enabled = is_lsl_connected and not is_session_active
+            tooltip_text = ""
+            if not is_lsl_connected:
+                tooltip_text = "Requires Muse connection."
             
             for button_name in ['btn_work_session', 'btn_video_session', 'btn_game_session']:
                 if hasattr(self, button_name):
