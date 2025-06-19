@@ -74,10 +74,12 @@ class HybridEEGClassifier:
     Hybrid classifier that combines ML model prediction with band-power level detection
     """
     
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, sampling_rate=DEFAULT_SAMPLING_RATE):
         self.model = self._load_classifier_model(model_path)
         self.baseline_metrics = None
 
+        self.sampling_rate = sampling_rate
+        
         self.feature_names = [
             # Basic band powers
             'alpha_power', 'beta_power', 'theta_power', 'gamma_power',
@@ -288,19 +290,162 @@ class HybridEEGClassifier:
             "bt_ratio": bt_ratio
         }
     
-    def _calculate_channel_band_powers(self, window_data):
-        """Calculate band powers for each channel separately"""
+
+
+    def _extract_full_features(self, window_data):
+        """
+        Extract complete feature set to match the classifier - Updated to match training exactly
+        
+        Args:
+            window_data: Shape (4, samples) - [TP9, AF7, AF8, TP10]
+        """
+        features = {}
+        
+        try:
+            # Channel mapping for neuroanatomical analysis (same as training)
+            temporal_channels = [0, 3]  # TP9, TP10
+            frontal_channels = [1, 2]   # AF7, AF8
+            left_channels = [0, 1]      # TP9, AF7
+            right_channels = [2, 3]     # AF8, TP10
+            
+            # === 1. CALCULATE CHANNEL-SPECIFIC BAND POWERS (MATCH TRAINING) ===
+            channel_band_powers = self._calculate_channel_band_powers_training_style(window_data)
+            if not channel_band_powers:
+                return None
+            
+            # === 2. OVERALL BAND POWERS (for backward compatibility) ===
+            total_powers = {}
+            for band in ['theta', 'alpha', 'beta', 'gamma']:
+                total_powers[band] = np.mean([channel_band_powers[ch][band] for ch in range(4)])
+                features[f'{band}_power'] = total_powers[band]
+            
+            # Total power
+            features['total_power'] = sum(total_powers.values())
+            
+            # Classic ratios
+            features['alpha_beta_ratio'] = total_powers['alpha'] / total_powers['beta'] if total_powers['beta'] > 0 else 0
+            features['beta_theta_ratio'] = total_powers['beta'] / total_powers['theta'] if total_powers['theta'] > 0 else 0
+            features['theta_alpha_ratio'] = total_powers['theta'] / total_powers['alpha'] if total_powers['alpha'] > 0 else 0
+            
+            # === 3. REGION-SPECIFIC FEATURES ===
+            
+            # Temporal region powers
+            temporal_powers = {}
+            for band in ['theta', 'alpha', 'beta', 'gamma']:
+                temporal_powers[band] = np.mean([channel_band_powers[ch][band] for ch in temporal_channels])
+                features[f'temporal_{band}'] = temporal_powers[band]
+            
+            # Frontal region powers
+            frontal_powers = {}
+            for band in ['theta', 'alpha', 'beta', 'gamma']:
+                frontal_powers[band] = np.mean([channel_band_powers[ch][band] for ch in frontal_channels])
+                features[f'frontal_{band}'] = frontal_powers[band]
+            
+            # === 4. HEMISPHERE-SPECIFIC FEATURES ===
+            
+            # Left hemisphere
+            left_powers = {}
+            for band in ['theta', 'alpha', 'beta', 'gamma']:
+                left_powers[band] = np.mean([channel_band_powers[ch][band] for ch in left_channels])
+                features[f'left_{band}'] = left_powers[band]
+            
+            # Right hemisphere  
+            right_powers = {}
+            for band in ['theta', 'alpha', 'beta', 'gamma']:
+                right_powers[band] = np.mean([channel_band_powers[ch][band] for ch in right_channels])
+                features[f'right_{band}'] = right_powers[band]
+            
+            # === 5. NEUROANATOMICALLY-INFORMED RATIOS ===
+            
+            # Alpha ratios (temporal regions more sensitive)
+            features['temporal_alpha_beta'] = temporal_powers['alpha'] / temporal_powers['beta'] if temporal_powers['beta'] > 0 else 0
+            features['temporal_alpha_theta'] = temporal_powers['alpha'] / temporal_powers['theta'] if temporal_powers['theta'] > 0 else 0
+            
+            # Theta ratios (frontal regions for cognitive load)
+            features['frontal_theta_alpha'] = frontal_powers['theta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
+            features['frontal_theta_beta'] = frontal_powers['theta'] / frontal_powers['beta'] if frontal_powers['beta'] > 0 else 0
+            
+            # Beta ratios (frontal regions for concentration)
+            features['frontal_beta_alpha'] = frontal_powers['beta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
+            features['frontal_beta_theta'] = frontal_powers['beta'] / frontal_powers['theta'] if frontal_powers['theta'] > 0 else 0
+            
+            # === 6. ASYMMETRY FEATURES ===
+            
+            # Frontal alpha asymmetry (approach/withdrawal)
+            frontal_left_alpha = channel_band_powers[1]['alpha']  # AF7
+            frontal_right_alpha = channel_band_powers[2]['alpha']  # AF8
+            features['frontal_alpha_asymmetry'] = (frontal_right_alpha - frontal_left_alpha) / (frontal_right_alpha + frontal_left_alpha) if (frontal_right_alpha + frontal_left_alpha) > 0 else 0
+            
+            # Temporal alpha asymmetry
+            temporal_left_alpha = channel_band_powers[0]['alpha']  # TP9
+            temporal_right_alpha = channel_band_powers[3]['alpha']  # TP10
+            features['temporal_alpha_asymmetry'] = (temporal_right_alpha - temporal_left_alpha) / (temporal_right_alpha + temporal_left_alpha) if (temporal_right_alpha + temporal_left_alpha) > 0 else 0
+            
+            # Beta asymmetry (concentration lateralization)
+            features['beta_asymmetry'] = (right_powers['beta'] - left_powers['beta']) / (right_powers['beta'] + left_powers['beta']) if (right_powers['beta'] + left_powers['beta']) > 0 else 0
+            
+            # === 7. CROSS-REGIONAL COMPARISONS ===
+            
+            # Frontal-Temporal ratios (attention vs relaxation)
+            features['fronto_temporal_alpha'] = frontal_powers['alpha'] / temporal_powers['alpha'] if temporal_powers['alpha'] > 0 else 0
+            features['fronto_temporal_theta'] = frontal_powers['theta'] / temporal_powers['theta'] if temporal_powers['theta'] > 0 else 0
+            features['fronto_temporal_beta'] = frontal_powers['beta'] / temporal_powers['beta'] if temporal_powers['beta'] > 0 else 0
+            
+            # === 8. COMPOSITE INDICES ===
+            
+            # Relaxation index: High temporal alpha, low frontal beta/theta
+            relaxation_numerator = temporal_powers['alpha']
+            relaxation_denominator = frontal_powers['beta'] + frontal_powers['theta']
+            features['relaxation_index'] = relaxation_numerator / relaxation_denominator if relaxation_denominator > 0 else 0
+            
+            # Concentration index: High frontal beta/theta, low temporal alpha
+            concentration_numerator = frontal_powers['beta'] + frontal_powers['theta']
+            concentration_denominator = temporal_powers['alpha']
+            features['concentration_index'] = concentration_numerator / concentration_denominator if concentration_denominator > 0 else 0
+            
+            # Cognitive load index: Frontal theta/alpha ratio
+            features['cognitive_load_index'] = frontal_powers['theta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
+            
+            # === 9. SPECTRAL FEATURES (MATCH TRAINING) ===
+            spectral_features = self._calculate_spectral_features_training_style(window_data)
+            features.update(spectral_features)
+            
+            # === 10. TEMPORAL FEATURES (MATCH TRAINING) ===
+            temporal_features = self._calculate_temporal_features_training_style(window_data)
+            features.update(temporal_features)
+            
+            # === 11. DELTA FEATURES (Use history if available) ===
+            delta_features = self._calculate_delta_features(features)
+            features.update(delta_features)
+            
+            # === 12. MOVING AVERAGE FEATURES (Use history if available) ===
+            ma_features = self._calculate_moving_average_features(features)
+            features.update(ma_features)
+            
+            return features
+                
+        except Exception as e:
+            logger.error(f"Error extracting full features: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _calculate_channel_band_powers_training_style(self, window_data):
+        """Calculate band powers for each channel using training-style method"""
         
         try:
             channel_powers = []
-            fs = 256.0  # Sampling rate
-            nperseg = 256
-            noverlap = 128
+            fs = self.sampling_rate
+            
+            # Use same parameters as training
+            nperseg = min(256, window_data.shape[1])
+            noverlap = nperseg // 2
             
             for ch_idx in range(window_data.shape[0]):
                 channel_data = window_data[ch_idx, :]
                 
-                # Calculate PSD using Welch method
+                # Calculate PSD using Welch method (SAME AS TRAINING)
+                from scipy.signal import welch
                 freqs, psd = welch(
                     channel_data,
                     fs=fs,
@@ -335,16 +480,19 @@ class HybridEEGClassifier:
             logger.error(f"Error calculating channel band powers: {e}")
             return None
 
-    def _calculate_spectral_features(self, window_data):
-        """Calculate spectral features from PSD"""
+    def _calculate_spectral_features_training_style(self, window_data):
+        """Calculate spectral features exactly like training"""
         
         features = {}
         
         try:
+            from scipy.signal import welch
+            from scipy.stats import skew, kurtosis
+            
             all_psds = []
-            fs = 256.0
-            nperseg = 256
-            noverlap = 128
+            fs = self.sampling_rate
+            nperseg = min(256, window_data.shape[1])
+            noverlap = nperseg // 2
             
             for ch_idx in range(window_data.shape[0]):
                 channel_data = window_data[ch_idx, :]
@@ -363,7 +511,7 @@ class HybridEEGClassifier:
             # Average PSD across channels
             avg_psd = np.mean(all_psds, axis=0)
             
-            # Spectral features
+            # Spectral features (SAME AS TRAINING)
             features['spectral_centroid'] = np.sum(freqs * avg_psd) / np.sum(avg_psd) if np.sum(avg_psd) > 0 else 0
             
             cumsum_psd = np.cumsum(avg_psd)
@@ -383,7 +531,6 @@ class HybridEEGClassifier:
             dominant_freq_idx = np.argmax(avg_psd)
             features['dominant_frequency'] = freqs[dominant_freq_idx]
             
-            from scipy.stats import skew, kurtosis
             features['spectral_skewness'] = skew(avg_psd)
             features['spectral_kurtosis'] = kurtosis(avg_psd)
             
@@ -395,8 +542,8 @@ class HybridEEGClassifier:
         
         return features
 
-    def _calculate_temporal_features(self, window_data):
-        """Calculate temporal/statistical features from time domain"""
+    def _calculate_temporal_features_training_style(self, window_data):
+        """Calculate temporal/statistical features exactly like training"""
         
         features = {}
         
@@ -419,10 +566,10 @@ class HybridEEGClassifier:
                 
                 channel_features.append(ch_features)
             
-            # Average across channels
+            # Average across channels (SAME AS TRAINING)
             for feat_name in channel_features[0].keys():
                 features[f'temporal_{feat_name}'] = np.mean([ch[feat_name] for ch in channel_features])
-            
+                
         except Exception as e:
             logger.error(f"Error calculating temporal features: {e}")
             default_features = [
@@ -434,154 +581,77 @@ class HybridEEGClassifier:
         
         return features
 
-    def _extract_full_features(self, window_data):
-        """
-        Extract complete feature set to match the classifier
+    def _calculate_delta_features(self, current_features):
+        """Calculate delta features using history"""
+        delta_features = {}
         
-        Args:
-            window_data: Shape (4, samples) - [TP9, AF7, AF8, TP10]
-        """
-        features = {}
+        # If we have history, calculate deltas
+        if hasattr(self, 'feature_history') and len(self.feature_history) > 0:
+            prev_features = self.feature_history[-1]
+            
+            key_features = ['alpha_power', 'beta_power', 'theta_power', 'gamma_power',
+                        'alpha_beta_ratio', 'beta_theta_ratio', 'spectral_centroid']
+            
+            for feat in key_features:
+                if feat in current_features and feat in prev_features:
+                    delta_val = current_features[feat] - prev_features[feat]
+                    delta_features[f'delta_{feat}'] = delta_val
+                    
+                    if prev_features[feat] != 0:
+                        delta_features[f'rel_delta_{feat}'] = delta_val / prev_features[feat]
+                    else:
+                        delta_features[f'rel_delta_{feat}'] = 0
+                else:
+                    delta_features[f'delta_{feat}'] = 0
+                    delta_features[f'rel_delta_{feat}'] = 0
+        else:
+            # No history, set to zero
+            key_features = ['alpha_power', 'beta_power', 'theta_power', 'gamma_power',
+                        'alpha_beta_ratio', 'beta_theta_ratio', 'spectral_centroid']
+            for feat in key_features:
+                delta_features[f'delta_{feat}'] = 0
+                delta_features[f'rel_delta_{feat}'] = 0
         
-        try:
-            # Channel mapping for neuroanatomical analysis
-            temporal_channels = [0, 3]  # TP9, TP10
-            frontal_channels = [1, 2]   # AF7, AF8
-            left_channels = [0, 1]      # TP9, AF7
-            right_channels = [2, 3]     # AF8, TP10
-            
-            # === 1. CALCULATE CHANNEL-SPECIFIC BAND POWERS ===
-            channel_band_powers = self._calculate_channel_band_powers(window_data)
-            if not channel_band_powers:
-                return None
-            
-            # === 2. REGION-SPECIFIC FEATURES ===
-            
-            # Temporal region powers
-            temporal_powers = {}
-            for band in ['theta', 'alpha', 'beta', 'gamma']:
-                temporal_powers[band] = np.mean([channel_band_powers[ch][band] for ch in temporal_channels])
-                features[f'temporal_{band}'] = temporal_powers[band]
-            
-            # Frontal region powers
-            frontal_powers = {}
-            for band in ['theta', 'alpha', 'beta', 'gamma']:
-                frontal_powers[band] = np.mean([channel_band_powers[ch][band] for ch in frontal_channels])
-                features[f'frontal_{band}'] = frontal_powers[band]
-            
-            # === 3. HEMISPHERE-SPECIFIC FEATURES ===
-            
-            # Left hemisphere
-            left_powers = {}
-            for band in ['theta', 'alpha', 'beta', 'gamma']:
-                left_powers[band] = np.mean([channel_band_powers[ch][band] for ch in left_channels])
-                features[f'left_{band}'] = left_powers[band]
-            
-            # Right hemisphere  
-            right_powers = {}
-            for band in ['theta', 'alpha', 'beta', 'gamma']:
-                right_powers[band] = np.mean([channel_band_powers[ch][band] for ch in right_channels])
-                features[f'right_{band}'] = right_powers[band]
-            
-            # === 4. NEUROANATOMICALLY-INFORMED RATIOS ===
-            
-            # Alpha ratios
-            features['temporal_alpha_beta'] = temporal_powers['alpha'] / temporal_powers['beta'] if temporal_powers['beta'] > 0 else 0
-            features['temporal_alpha_theta'] = temporal_powers['alpha'] / temporal_powers['theta'] if temporal_powers['theta'] > 0 else 0
-            
-            # Theta ratios
-            features['frontal_theta_alpha'] = frontal_powers['theta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
-            features['frontal_theta_beta'] = frontal_powers['theta'] / frontal_powers['beta'] if frontal_powers['beta'] > 0 else 0
-            
-            # Beta ratios
-            features['frontal_beta_alpha'] = frontal_powers['beta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
-            features['frontal_beta_theta'] = frontal_powers['beta'] / frontal_powers['theta'] if frontal_powers['theta'] > 0 else 0
-            
-            # === 5. ASYMMETRY FEATURES ===
-            
-            # Frontal alpha asymmetry
-            frontal_left_alpha = channel_band_powers[1]['alpha']  # AF7
-            frontal_right_alpha = channel_band_powers[2]['alpha']  # AF8
-            features['frontal_alpha_asymmetry'] = (frontal_right_alpha - frontal_left_alpha) / (frontal_right_alpha + frontal_left_alpha) if (frontal_right_alpha + frontal_left_alpha) > 0 else 0
-            
-            # Temporal alpha asymmetry
-            temporal_left_alpha = channel_band_powers[0]['alpha']  # TP9
-            temporal_right_alpha = channel_band_powers[3]['alpha']  # TP10
-            features['temporal_alpha_asymmetry'] = (temporal_right_alpha - temporal_left_alpha) / (temporal_right_alpha + temporal_left_alpha) if (temporal_right_alpha + temporal_left_alpha) > 0 else 0
-            
-            # Beta asymmetry
-            features['beta_asymmetry'] = (right_powers['beta'] - left_powers['beta']) / (right_powers['beta'] + left_powers['beta']) if (right_powers['beta'] + left_powers['beta']) > 0 else 0
-            
-            # === 6. CROSS-REGIONAL COMPARISONS ===
-            
-            # Frontal-Temporal ratios
-            features['fronto_temporal_alpha'] = frontal_powers['alpha'] / temporal_powers['alpha'] if temporal_powers['alpha'] > 0 else 0
-            features['fronto_temporal_theta'] = frontal_powers['theta'] / temporal_powers['theta'] if temporal_powers['theta'] > 0 else 0
-            features['fronto_temporal_beta'] = frontal_powers['beta'] / temporal_powers['beta'] if temporal_powers['beta'] > 0 else 0
-            
-            # === 7. COMPOSITE INDICES ===
-            
-            # Relaxation index
-            relaxation_numerator = temporal_powers['alpha']
-            relaxation_denominator = frontal_powers['beta'] + frontal_powers['theta']
-            features['relaxation_index'] = relaxation_numerator / relaxation_denominator if relaxation_denominator > 0 else 0
-            
-            # Concentration index
-            concentration_numerator = frontal_powers['beta'] + frontal_powers['theta']
-            concentration_denominator = temporal_powers['alpha']
-            features['concentration_index'] = concentration_numerator / concentration_denominator if concentration_denominator > 0 else 0
-            
-            # Cognitive load index
-            features['cognitive_load_index'] = frontal_powers['theta'] / frontal_powers['alpha'] if frontal_powers['alpha'] > 0 else 0
-            
-            # === 8. OVERALL BAND POWERS ===
-            
-            # Overall band powers
-            total_powers = {}
-            for band in ['theta', 'alpha', 'beta', 'gamma']:
-                total_powers[band] = np.mean([channel_band_powers[ch][band] for ch in range(4)])
-                features[f'{band}_power'] = total_powers[band]
-            
-            # Total power
-            features['total_power'] = sum(total_powers.values())
-            
-            # Classic ratios
-            features['alpha_beta_ratio'] = total_powers['alpha'] / total_powers['beta'] if total_powers['beta'] > 0 else 0
-            features['beta_theta_ratio'] = total_powers['beta'] / total_powers['theta'] if total_powers['theta'] > 0 else 0
-            features['theta_alpha_ratio'] = total_powers['theta'] / total_powers['alpha'] if total_powers['alpha'] > 0 else 0
-            
-            # === 9. SPECTRAL FEATURES ===
-            spectral_features = self._calculate_spectral_features(window_data)
-            features.update(spectral_features)
-            
-            # === 10. TEMPORAL FEATURES ===
-            temporal_features = self._calculate_temporal_features(window_data)
-            features.update(temporal_features)
-                
-            # Add placeholders for features we can't calculate in real-time
-            # (These would normally come from time series analysis)
-            delta_features = [
-                'delta_alpha_power', 'delta_beta_power', 'delta_theta_power', 'delta_gamma_power',
-                'delta_alpha_beta_ratio', 'delta_beta_theta_ratio', 'delta_spectral_centroid',
-                'rel_delta_alpha_power', 'rel_delta_beta_power', 'rel_delta_theta_power', 'rel_delta_gamma_power',
-                'rel_delta_alpha_beta_ratio', 'rel_delta_beta_theta_ratio', 'rel_delta_spectral_centroid'
-            ]
-            for feat in delta_features:
-                features[feat] = 0.0
-                
-            # Moving average features
-            ma_features = [
-                'ma3_alpha_beta_ratio', 'ma3_beta_theta_ratio', 'ma3_alpha_power', 'ma3_beta_power',
-                'ma5_alpha_beta_ratio', 'ma5_beta_theta_ratio', 'std5_alpha_beta_ratio', 'std5_beta_theta_ratio'
-            ]
-            for feat in ma_features:
-                features[feat] = features.get('alpha_beta_ratio', 0.0) if 'alpha_beta' in feat else features.get('beta_theta_ratio', 0.0)
-                
-            return features
-                
-        except Exception as e:
-            logger.error(f"Error extracting full features: {e}")
-            return None
+        return delta_features
+
+    def _calculate_moving_average_features(self, current_features):
+        """Calculate moving average features using history"""
+        ma_features = {}
+        
+        # Initialize feature history if not exists
+        if not hasattr(self, 'feature_history'):
+            self.feature_history = []
+        
+        # Add current features to history
+        self.feature_history.append(current_features.copy())
+        
+        # Limit history size
+        if len(self.feature_history) > 10:
+            self.feature_history.pop(0)
+        
+        # Calculate moving averages
+        if len(self.feature_history) >= 3:
+            recent_3 = self.feature_history[-3:]
+            for feat in ['alpha_beta_ratio', 'beta_theta_ratio', 'alpha_power', 'beta_power']:
+                values = [f.get(feat, 0) for f in recent_3]
+                ma_features[f'ma3_{feat}'] = np.mean(values)
+        else:
+            for feat in ['alpha_beta_ratio', 'beta_theta_ratio', 'alpha_power', 'beta_power']:
+                ma_features[f'ma3_{feat}'] = current_features.get(feat, 0)
+        
+        # 5-window moving averages
+        if len(self.feature_history) >= 5:
+            recent_5 = self.feature_history[-5:]
+            for feat in ['alpha_beta_ratio', 'beta_theta_ratio']:
+                values = [f.get(feat, 0) for f in recent_5]
+                ma_features[f'ma5_{feat}'] = np.mean(values)
+                ma_features[f'std5_{feat}'] = np.std(values)
+        else:
+            for feat in ['alpha_beta_ratio', 'beta_theta_ratio']:
+                ma_features[f'ma5_{feat}'] = ma_features.get(f'ma3_{feat}', 0)
+                ma_features[f'std5_{feat}'] = 0
+        
+        return ma_features
     
     
     def _simple_classify(self, alpha_ratio, beta_ratio, theta_ratio, bt_ratio):
@@ -1757,90 +1827,128 @@ class EEGProcessingWorker(QtCore.QObject):
         return eeg_filtered
     
     def _calculate_band_powers(self, eeg_segment):
-        """Calculate band powers for EEG segment"""
-        if eeg_segment.shape[1] < self.nfft:
+        """Calculate band powers for EEG segment - Robust version with better error handling"""
+        if eeg_segment.shape[1] < 64:  # Need minimum samples
+            logger.debug(f"Insufficient samples for band power calculation: {eeg_segment.shape[1]}")
             return None
             
-        # Apply artifact rejection
-        artifact_mask = self._improved_artifact_rejection(eeg_segment)
-        if np.sum(artifact_mask) < 0.7 * eeg_segment.shape[1]:
-            return None
-        
-        # Calculate band powers for each channel
-        metrics_list = []
-        for ch_idx in range(NUM_EEG_CHANNELS):
-            ch_data = eeg_segment[ch_idx, artifact_mask].copy() if np.any(artifact_mask) else eeg_segment[ch_idx].copy()
+        try:
+            # Apply more lenient artifact rejection
+            artifact_mask = self._lenient_artifact_rejection(eeg_segment)
+            if np.sum(artifact_mask) < 0.5 * eeg_segment.shape[1]:  # More lenient threshold
+                logger.debug("Too many artifacts detected, skipping window")
+                return None
             
-            if len(ch_data) < self.nfft:
-                pad_length = self.nfft - len(ch_data)
-                ch_data = np.pad(ch_data, (0, pad_length), mode='reflect')
+            # Calculate band powers for each channel using scipy (matches training)
+            metrics_list = []
+            for ch_idx in range(NUM_EEG_CHANNELS):
+                ch_data = eeg_segment[ch_idx, artifact_mask].copy() if np.any(artifact_mask) else eeg_segment[ch_idx].copy()
                 
-            DataFilter.detrend(ch_data, DetrendOperations.CONSTANT.value)
-            
-            try:
-                psd = DataFilter.get_psd_welch(
-                    ch_data, 
-                    self.nfft, 
-                    self.welch_overlap_samples, 
-                    int(self.sampling_rate), 
-                    WindowOperations.HANNING.value
-                )
+                # Ensure minimum length
+                if len(ch_data) < 64:
+                    ch_data = np.pad(ch_data, (0, 64 - len(ch_data)), mode='constant', constant_values=0)
                 
-                metrics_list.append({
-                    'theta': DataFilter.get_band_power(psd, THETA_BAND[0], THETA_BAND[1]),
-                    'alpha': DataFilter.get_band_power(psd, ALPHA_BAND[0], ALPHA_BAND[1]),
-                    'beta': DataFilter.get_band_power(psd, BETA_BAND[0], BETA_BAND[1])
-                })
-            except Exception as e:
-                logger.error(f"PSD calculation failed: {e}")
+                try:
+                    # Primary method: Use scipy.signal.welch (matches training)
+                    from scipy.signal import welch
+                    
+                    nperseg = min(256, len(ch_data))
+                    noverlap = nperseg // 2
+                    
+                    freqs, psd = welch(
+                        ch_data,
+                        fs=self.sampling_rate,
+                        nperseg=nperseg,
+                        noverlap=noverlap,
+                        window='hann',
+                        detrend='constant'
+                    )
+                    
+                    # Calculate band powers
+                    ch_metrics = {}
+                    bands = {
+                        'theta': THETA_BAND,
+                        'alpha': ALPHA_BAND,
+                        'beta': BETA_BAND
+                    }
+                    
+                    for band_name, (low_freq, high_freq) in bands.items():
+                        freq_mask = (freqs >= low_freq) & (freqs < high_freq)
+                        if np.any(freq_mask):
+                            band_power = np.trapz(psd[freq_mask], freqs[freq_mask])
+                            ch_metrics[band_name] = max(0.001, band_power)  # Avoid zero division
+                        else:
+                            ch_metrics[band_name] = 0.001
+                    
+                    metrics_list.append(ch_metrics)
+                    
+                except Exception as e:
+                    logger.warning(f"Scipy method failed for channel {ch_idx}: {e}, trying BrainFlow fallback")
+                    
+                    # Fallback: Try BrainFlow method
+                    try:
+                        if BRAINFLOW_AVAILABLE:
+                            # Simple detrend
+                            ch_data_detrended = ch_data - np.mean(ch_data)
+                            
+                            psd = DataFilter.get_psd_welch(
+                                ch_data_detrended.astype(np.float64), 
+                                min(256, len(ch_data_detrended)), 
+                                min(128, len(ch_data_detrended) // 2), 
+                                int(self.sampling_rate), 
+                                WindowOperations.HANNING.value
+                            )
+                            
+                            ch_metrics = {
+                                'theta': max(0.001, DataFilter.get_band_power(psd, THETA_BAND[0], THETA_BAND[1])),
+                                'alpha': max(0.001, DataFilter.get_band_power(psd, ALPHA_BAND[0], ALPHA_BAND[1])),
+                                'beta': max(0.001, DataFilter.get_band_power(psd, BETA_BAND[0], BETA_BAND[1]))
+                            }
+                            
+                            metrics_list.append(ch_metrics)
+                            
+                        else:
+                            logger.error(f"Both scipy and BrainFlow failed for channel {ch_idx}")
+                            return None
+                            
+                    except Exception as e2:
+                        logger.error(f"BrainFlow fallback also failed for channel {ch_idx}: {e2}")
+                        return None
+                        
+            if len(metrics_list) != NUM_EEG_CHANNELS:
+                logger.error(f"Expected {NUM_EEG_CHANNELS} channel metrics, got {len(metrics_list)}")
                 return None
                 
-        if len(metrics_list) != NUM_EEG_CHANNELS:
-            return None
+            # Calculate weighted average
+            avg_metrics = {
+                'theta': np.sum([m['theta'] * self.channel_weights[i] for i, m in enumerate(metrics_list)]),
+                'alpha': np.sum([m['alpha'] * self.channel_weights[i] for i, m in enumerate(metrics_list)]),
+                'beta': np.sum([m['beta'] * self.channel_weights[i] for i, m in enumerate(metrics_list)])
+            }
             
-        # Calculate weighted average
-        avg_metrics = {
-            'theta': np.sum([m['theta'] * self.channel_weights[i] for i, m in enumerate(metrics_list)]),
-            'alpha': np.sum([m['alpha'] * self.channel_weights[i] for i, m in enumerate(metrics_list)]),
-            'beta': np.sum([m['beta'] * self.channel_weights[i] for i, m in enumerate(metrics_list)])
-        }
-        
-        avg_metrics['ab_ratio'] = avg_metrics['alpha'] / avg_metrics['beta'] if avg_metrics['beta'] > 1e-9 else 0
-        avg_metrics['bt_ratio'] = avg_metrics['beta'] / avg_metrics['theta'] if avg_metrics['theta'] > 1e-9 else 0
-        
-        # Calculate some metrics the classifier might expect
-        gamma_power = 0.0  # Dummy gamma power (not computed in this implementation)
-        avg_metrics['gamma_power'] = gamma_power
-        
-        # Extract region-specific metrics for classifier
-        avg_metrics['frontal_gamma'] = gamma_power
-        avg_metrics['temporal_alpha'] = avg_metrics['alpha']
-        avg_metrics['temporal_theta'] = avg_metrics['theta']
-        avg_metrics['temporal_gamma'] = gamma_power
-        
-        # Channel-specific metrics (approximated for classifier compatibility)
-        avg_metrics['left_gamma'] = gamma_power
-        avg_metrics['right_gamma'] = gamma_power
-        avg_metrics['right_beta'] = avg_metrics['beta']
-        
-        # Other features the classifier might expect
-        avg_metrics['dominant_frequency'] = 10.0  # Placeholder
-        avg_metrics['max_beta_theta_ratio'] = avg_metrics['bt_ratio']
-        avg_metrics['max_alpha_beta_ratio'] = avg_metrics['ab_ratio']
-        avg_metrics['max3_beta_theta_ratio'] = avg_metrics['bt_ratio']
-        avg_metrics['temporal_alpha_theta'] = avg_metrics['alpha'] / avg_metrics['theta'] if avg_metrics['theta'] > 1e-9 else 0
-        avg_metrics['fronto_temporal_theta'] = avg_metrics['theta']
-        
-        return avg_metrics
-    
-    def _improved_artifact_rejection(self, eeg_data):
-        """Artifact rejection for EEG data"""
-        channel_thresholds = [150, 100, 100, 150]
+            # Calculate ratios with safe division
+            avg_metrics['ab_ratio'] = avg_metrics['alpha'] / avg_metrics['beta'] if avg_metrics['beta'] > 0.001 else 0
+            avg_metrics['bt_ratio'] = avg_metrics['beta'] / avg_metrics['theta'] if avg_metrics['theta'] > 0.001 else 0
+            
+            logger.debug(f"Successfully calculated band powers: alpha={avg_metrics['alpha']:.3f}, beta={avg_metrics['beta']:.3f}, theta={avg_metrics['theta']:.3f}")
+            
+            return avg_metrics
+            
+        except Exception as e:
+            logger.error(f"Band power calculation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _lenient_artifact_rejection(self, eeg_data):
+        """More lenient artifact rejection"""
+        # Use more permissive thresholds
+        channel_thresholds = [300, 200, 200, 300]  # Doubled from original
         amplitude_mask = ~np.any(np.abs(eeg_data) > np.array(channel_thresholds).reshape(-1, 1), axis=0)
         
         diff_mask = np.ones(eeg_data.shape[1], dtype=bool)
         if eeg_data.shape[1] > 1:
-            diff_thresholds = [50, 30, 30, 50]
+            diff_thresholds = [100, 60, 60, 100]  # Doubled from original
             diff_mask = ~np.any(
                 np.abs(np.diff(eeg_data, axis=1, prepend=eeg_data[:, :1])) > 
                 np.array(diff_thresholds).reshape(-1, 1), 
