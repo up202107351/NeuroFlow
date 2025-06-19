@@ -7,7 +7,7 @@ automatically repeating the signal when it reaches the end.
 
 Usage:
     python lsl_eeg_simulator.py --file live_session_data/eeg_data_raw.npy [--speed 1.0]
-    python lsl_eeg_simulator.py --file eeg_data.csv [--speed 1.0]
+    python lsl_eeg_simulator.py --file dataset/subjectb-concentrating-1.csv
 """
 
 import numpy as np
