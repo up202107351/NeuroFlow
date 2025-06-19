@@ -130,7 +130,9 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         # ... (rest of stacked widget and page setup as before) ...
         self.home_page = HomePageWidget()
         self.meditation_page = UnifiedEEGPageWidget(self, main_app_window_ref=self, page_type="meditation")
+        self.meditation_page.update_button_states(True)  # Ensure buttons are correct on init
         self.focus_page = UnifiedEEGPageWidget(self, main_app_window_ref=self, page_type="focus")
+        self.focus_page.update_button_states(True)
         self.history_page = HistoryPageWidget(self, main_app_window_ref=self) # Placeholder for now
 
         self.page_map = {
@@ -227,6 +229,8 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
         # If on meditation/focus page, you might want to update their buttons too
         if self.stacked_widget.currentWidget() == self.meditation_page:
              self.meditation_page.update_button_states(self.is_lsl_connected)
+        elif self.stacked_widget.currentWidget() == self.focus_page:
+            self.focus_page.update_button_states(self.is_lsl_connected)  # Uncomment if needed
         # Similarly for focus page if it has start buttons
 
 
@@ -261,7 +265,7 @@ class NeuroAppMainWindow(QtWidgets.QMainWindow):
     def go_to_focus_page(self):
         self.stacked_widget.setCurrentWidget(self.focus_page)
         self.update_active_button(self.sidebar_buttons["Focus"])
-        self.focus_page.update_button_tooltips(self.is_lsl_connected) # Update tooltips based on LSL status
+        self.focus_page.update_button_states(self.is_lsl_connected) # Update tooltips based on LSL status
         # If focus page has buttons needing LSL, call its update_button_states here
 
     def closeEvent(self, event):
