@@ -67,12 +67,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.signal_quality_validator = SignalQualityValidator()
         self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
 
-        if self.main_app_window:
-            self.update_button_states(self.main_app_window.is_lsl_connected)
-        else:
-            print(f"Warning: {self.page_type.title()}PageWidget initialized without main_app_window reference.")
-            self.update_button_states(False)
-
     def _setup_page_config(self):
         """Configure page-specific settings"""
         if self.page_type == "meditation":
@@ -129,6 +123,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.btn_start_video_feedback = QtWidgets.QPushButton("Start Video Relaxation")
         self.btn_start_video_feedback.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
         self.btn_start_video_feedback.clicked.connect(lambda: self.start_session("video"))
+        self.btn_start_video_feedback.setEnabled(True)
         video_teaser_layout.addWidget(self.btn_start_video_feedback)
 
         teasers_layout.addLayout(video_teaser_layout)
@@ -154,6 +149,7 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.btn_start_unity_game = QtWidgets.QPushButton("Launch Unity Game")
         self.btn_start_unity_game.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
         self.btn_start_unity_game.clicked.connect(lambda: self.start_session("unity"))
+        self.btn_start_unity_game.setEnabled(True)
         game_teaser_layout.addWidget(self.btn_start_unity_game)
 
         teasers_layout.addLayout(game_teaser_layout)
@@ -166,21 +162,64 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         row1_layout.setSpacing(30)
 
         # Work session option
-        work_focus_layout = self._create_focus_option_layout(
-            title="Work Session",
-            image_path="./assets/work.jpg",
-            button_text="Start",
-            action_slot=lambda: self.start_session("work")
-        )
+        work_focus_layout = QtWidgets.QVBoxLayout()
+        work_focus_layout.setAlignment(QtCore.Qt.AlignCenter)
+
+        work_title_label = QtWidgets.QLabel("Work Session")
+        work_title_label.setFont(QtGui.QFont("Arial", 14, QtGui.QFont.Medium))
+        work_title_label.setAlignment(QtCore.Qt.AlignCenter)
+        work_focus_layout.addWidget(work_title_label)
+        work_focus_layout.addSpacing(10)
+        
+        work_image_label = QtWidgets.QLabel()
+        work_image_path = "./assets/work.jpg"
+        if os.path.exists(work_image_path):
+            pixmap = QtGui.QPixmap(work_image_path)
+            work_image_label.setPixmap(pixmap.scaled(250, 150, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        else:
+            work_image_label.setText("(Work Session Image Not Found)")
+            work_image_label.setStyleSheet("background-color: #444; border: 1px solid #555; color: #ccc;")
+        work_image_label.setFixedSize(250, 150)
+        work_image_label.setAlignment(QtCore.Qt.AlignCenter)
+        work_focus_layout.addWidget(work_image_label)
+        work_focus_layout.addSpacing(10)
+
+        self.btn_work_session = QtWidgets.QPushButton("Start")
+        self.btn_work_session.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
+        self.btn_work_session.clicked.connect(lambda: self.start_session("work"))
+        self.btn_work_session.setEnabled(True)
+        work_focus_layout.addWidget(self.btn_work_session)
         row1_layout.addLayout(work_focus_layout)
 
+
         # Video session option
-        video_focus_layout = self._create_focus_option_layout(
-            title="Video Session",
-            image_path="./assets/focus.jpg",
-            button_text="Start",
-            action_slot=lambda: self.start_session("video")
-        )
+        video_focus_layout = QtWidgets.QVBoxLayout()
+        video_focus_layout.setAlignment(QtCore.Qt.AlignCenter)
+
+        video_title_label = QtWidgets.QLabel("Video Session")
+        video_title_label.setFont(QtGui.QFont("Arial", 14, QtGui.QFont.Medium))
+        video_title_label.setAlignment(QtCore.Qt.AlignCenter)
+        video_focus_layout.addWidget(video_title_label)
+        video_focus_layout.addSpacing(10)
+
+        video_image_label = QtWidgets.QLabel()
+        video_image_path = "./assets/focus.jpg"
+        if os.path.exists(video_image_path):
+            pixmap = QtGui.QPixmap(video_image_path)
+            video_image_label.setPixmap(pixmap.scaled(250, 150, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        else:
+            video_image_label.setText("(Video Session Image Not Found)")
+            video_image_label.setStyleSheet("background-color: #444; border: 1px solid #555; color: #ccc;")
+        video_image_label.setFixedSize(250, 150)
+        video_image_label.setAlignment(QtCore.Qt.AlignCenter)
+        video_focus_layout.addWidget(video_image_label)
+        video_focus_layout.addSpacing(10)
+
+        self.btn_video_session = QtWidgets.QPushButton("Start")
+        self.btn_video_session.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
+        self.btn_video_session.clicked.connect(lambda: self.start_session("video"))
+        self.btn_video_session.setEnabled(True)
+        video_focus_layout.addWidget(self.btn_video_session)
         row1_layout.addLayout(video_focus_layout)
         
         self.main_layout.addLayout(row1_layout)
@@ -190,83 +229,38 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         row2_outer_layout = QtWidgets.QHBoxLayout()
         row2_outer_layout.addStretch(1)
 
-        game_focus_layout = self._create_focus_option_layout(
-            title="Game Session",
-            image_path="./assets/focus_game.jpg",
-            button_text="Start",
-            action_slot=lambda: self.start_session("unity"),
-            is_single_item_row=True
-        )
+        game_focus_layout = QtWidgets.QVBoxLayout()
+        game_focus_layout.setAlignment(QtCore.Qt.AlignCenter)
+
+        game_title_label = QtWidgets.QLabel("Game Session")
+        game_title_label.setFont(QtGui.QFont("Arial", 14, QtGui.QFont.Medium))
+        game_title_label.setAlignment(QtCore.Qt.AlignCenter)
+        game_focus_layout.addWidget(game_title_label)
+        game_focus_layout.addSpacing(10)
+
+        game_image_label = QtWidgets.QLabel()
+        game_image_path = "./assets/focus_game.jpg"
+        if os.path.exists(game_image_path):
+            pixmap = QtGui.QPixmap(game_image_path)
+            game_image_label.setPixmap(pixmap.scaled(300, 180, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        else:
+            game_image_label.setText("(Game Session Image Not Found)")
+            game_image_label.setStyleSheet("background-color: #444; border: 1px solid #555; color: #ccc;")
+        game_image_label.setFixedSize(300, 180)
+        game_image_label.setAlignment(QtCore.Qt.AlignCenter)
+        game_focus_layout.addWidget(game_image_label)
+        game_focus_layout.addSpacing(10)
+
+        self.btn_game_session = QtWidgets.QPushButton("Start")
+        self.btn_game_session.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
+        self.btn_game_session.clicked.connect(lambda: self.start_session("unity"))
+        self.btn_game_session.setEnabled(True)
+        game_focus_layout.addWidget(self.btn_game_session)
+
         row2_outer_layout.addLayout(game_focus_layout)
         row2_outer_layout.addStretch(1)
         
         self.main_layout.addLayout(row2_outer_layout)
-
-    def _create_focus_option_layout(self, title, image_path, button_text, action_slot, is_single_item_row=False):
-        """Helper function to create a consistent layout for each focus option."""
-        option_layout = QtWidgets.QVBoxLayout()
-        option_layout.setAlignment(QtCore.Qt.AlignCenter)
-
-        title_label = QtWidgets.QLabel(title)
-        title_label.setFont(QtGui.QFont("Arial", 14, QtGui.QFont.Medium))
-        title_label.setAlignment(QtCore.Qt.AlignCenter)
-        option_layout.addWidget(title_label)
-        option_layout.addSpacing(10)
-
-        image_label = QtWidgets.QLabel()
-        image_width = 250 if not is_single_item_row else 300
-        image_height = 150 if not is_single_item_row else 180
-
-        if os.path.exists(image_path):
-            pixmap = QtGui.QPixmap(image_path)
-            image_label.setPixmap(pixmap.scaled(image_width, image_height, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-        else:
-            image_label.setText(f"({title} Image Not Found)")
-            image_label.setStyleSheet("background-color: #444; border: 1px solid #555; color: #ccc;")
-        image_label.setFixedSize(image_width, image_height)
-        image_label.setAlignment(QtCore.Qt.AlignCenter)
-        option_layout.addWidget(image_label)
-        option_layout.addSpacing(10)
-
-        button = QtWidgets.QPushButton(button_text)
-        button.setStyleSheet("font-size: 11pt; padding: 8px 15px;")
-        button.clicked.connect(action_slot)
-        
-        # Store button reference for tooltips/disabling later
-        button_name = f"btn_{title.lower().replace(' ', '_')}"
-        setattr(self, button_name, button)
-        option_layout.addWidget(button)
-
-        return option_layout
-
-    def update_button_states(self, is_lsl_connected):
-        """Update button states based on connection status"""
-        is_session_active = bool(self.session_goal)
-
-        # Simplified logic: enable buttons if LSL is connected.
-        # More specific checks (session active, user logged in) are handled when the button is clicked.
-        enabled = is_lsl_connected
-
-        if self.page_type == "meditation":
-            # Meditation buttons
-            if hasattr(self, 'btn_start_video_feedback'):
-                self.btn_start_video_feedback.setEnabled(enabled)
-                self.btn_start_video_feedback.setToolTip("Muse must be connected to start." if not enabled else "")
-
-            if hasattr(self, 'btn_start_unity_game'):
-                self.btn_start_unity_game.setEnabled(enabled)
-                self.btn_start_unity_game.setToolTip("Muse must be connected to start." if not enabled else "")
-        else:
-            # Focus buttons
-            tooltip_text = ""
-            if not is_lsl_connected:
-                tooltip_text = "Requires Muse connection."
-            
-            for button_name in ['btn_work_session', 'btn_video_session', 'btn_game_session']:
-                if hasattr(self, button_name):
-                    button = getattr(self, button_name)
-                    button.setToolTip(tooltip_text)
-                    button.setEnabled(enabled)
 
     # EEG Worker Management - SIMPLIFIED
     def _setup_eeg_worker(self):
@@ -411,8 +405,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.video_player_window.show_calibration_progress(0)
         self.video_player_window.show()
         self.video_player_window.activateWindow()
-
-        self.update_button_states(self.main_app_window.is_lsl_connected)
         
         # Start the EEG session - PASS SESSION ID
         QtCore.QMetaObject.invokeMethod(self.eeg_worker, "start_session", 
@@ -506,9 +498,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         
         # Show the monitor window
         self.work_monitor_window.show()
-        
-        # Update UI buttons
-        self.update_button_states(self.main_app_window.is_lsl_connected)
         
         # Start EEG processing - PASS SESSION ID
         QtCore.QMetaObject.invokeMethod(self.eeg_worker, "start_session", 
@@ -925,11 +914,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self.focus_alert_shown = False
         self.last_sent_scene_index = -1
         
-        if self.main_app_window and hasattr(self.main_app_window, 'is_lsl_connected'):
-            self.update_button_states(self.main_app_window.is_lsl_connected)
-        else:
-            self.update_button_states(False)
-
     # Focus-specific methods (unchanged)
     def _check_focus_levels(self):
         """Analyze focus history to detect significant drops (focus page only)"""
@@ -1032,8 +1016,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
             self.unity_data_timer.timeout.connect(self.send_unity_heartbeat)
             self.unity_data_timer.start(2000)
             
-            self.update_button_states(self.main_app_window.is_lsl_connected)
-            
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to setup Unity game:\n{e}")
             self.stop_unity_session()
@@ -1067,7 +1049,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         # Reset session state (don't need to handle DB - worker does it)
         self.current_session_id = None
         self.session_goal = None
-        self.update_button_states(self.main_app_window.is_lsl_connected)
 
     # Utility methods (unchanged)
     def handle_recalibration_request(self):
