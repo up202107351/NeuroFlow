@@ -25,6 +25,7 @@ class HistoryPageWidget(QtWidgets.QWidget):
         self.sessions_data = []  # Store loaded sessions
         self.selected_session_id = None
         self.username = None  # Store username for display
+        self.current_eeg_data = None
         
         # Set up seaborn with NeuroFlow theme
         sns.set(style="darkgrid")
@@ -208,6 +209,12 @@ class HistoryPageWidget(QtWidgets.QWidget):
         self.canvas = FigureCanvas(self.figure)
         progress_layout.addWidget(self.canvas)
         
+        # Add a scrollbar for the EEG graph
+        self.eeg_scrollbar = QtWidgets.QScrollBar(QtCore.Qt.Horizontal)
+        self.eeg_scrollbar.valueChanged.connect(self.update_eeg_graph_view)
+        progress_layout.addWidget(self.eeg_scrollbar)
+        self.eeg_scrollbar.hide() # Initially hidden
+        
         # Brain Wave Activity tab
         brainwave_tab = QtWidgets.QWidget()
         brainwave_layout = QtWidgets.QVBoxLayout(brainwave_tab)
@@ -238,6 +245,14 @@ class HistoryPageWidget(QtWidgets.QWidget):
         # Initialize with empty/hidden details
         self.session_info_widget.hide()
         self.graph_tabs.hide()
+
+    def showEvent(self, event):
+        """Override the show event to refresh data when the page becomes visible."""
+        super().showEvent(event)
+        # This ensures that whenever the user navigates to the history page,
+        # the session list is updated with the latest data from the database.
+        if self.user_id:
+            self.refresh_sessions_list()
     
     def create_stat_card(self, title, value):
         """Create a styled stat card widget"""
@@ -586,115 +601,113 @@ class HistoryPageWidget(QtWidgets.QWidget):
         self.graph_tabs.setCurrentIndex(0)
         
     def generate_session_graph(self, session_id):
-        """Generate clean 4-channel EEG data visualization"""
+        """Generate clean 4-channel EEG data visualization with scrolling for long sessions."""
         try:
-            # Get EEG data from new batch format
             eeg_data = db.get_session_eeg_data(session_id)
             
-            if not eeg_data:
-                # No EEG data available
+            if not eeg_data or not eeg_data.get('timestamps'):
                 self.figure.clear()
                 ax = self.figure.add_subplot(111)
-                ax.text(0.5, 0.5, "No EEG data available for this session", 
-                        horizontalalignment='center', verticalalignment='center',
-                        transform=ax.transAxes, fontsize=12, color='#888')
+                ax.text(0.5, 0.5, "No EEG data for this session", 
+                        ha='center', va='center', transform=ax.transAxes, color='#888')
                 ax.set_axis_off()
                 self.canvas.draw()
+                self.eeg_scrollbar.hide()
+                self.current_eeg_data = None
                 return
-                
-            # Extract EEG data
+            
+            # Sort data by timestamp to prevent plotting artifacts
             timestamps = eeg_data['timestamps']
-            channel_data = [
-                eeg_data['channel_0'],  # TP9
-                eeg_data['channel_1'],  # AF7  
-                eeg_data['channel_2'],  # AF8
-                eeg_data['channel_3']   # TP10
-            ]
-            sampling_rate = eeg_data.get('sampling_rate', 256.0)
+            channel_data_list = [eeg_data['channel_0'], eeg_data['channel_1'], eeg_data['channel_2'], eeg_data['channel_3']]
+            if timestamps:
+                sorted_data = sorted(zip(timestamps, *channel_data_list))
+                timestamps, *channel_data_sorted_tuple = zip(*sorted_data)
+                eeg_data['timestamps'] = list(timestamps)
+                for i, ch_name in enumerate(['channel_0', 'channel_1', 'channel_2', 'channel_3']):
+                    eeg_data[ch_name] = np.array(channel_data_sorted_tuple[i])
+
+            self.current_eeg_data = eeg_data
             
-            if not timestamps or len(timestamps) == 0:
-                self.figure.clear()
-                ax = self.figure.add_subplot(111)
-                ax.text(0.5, 0.5, "No EEG data points found", 
-                        horizontalalignment='center', verticalalignment='center',
-                        transform=ax.transAxes, fontsize=12, color='#888')
-                ax.set_axis_off()
-                self.canvas.draw()
-                return
+            duration_seconds = eeg_data['timestamps'][-1] - eeg_data['timestamps'][0]
             
-            # Convert timestamps to seconds elapsed
-            start_time = timestamps[0]
-            time_seconds = [(ts - start_time) for ts in timestamps]
-            
-            # Create the plot
-            self.figure.clear()
-            plt.style.use('dark_background')
-            self.figure.patch.set_facecolor('#2d2d2d')
-            
-            # Channel names and colors
-            channel_names = ['TP9', 'AF7', 'AF8', 'TP10']
-            channel_colors = [NEUROFLOW_COLORS[0], NEUROFLOW_COLORS[1], 
-                            NEUROFLOW_COLORS[2], NEUROFLOW_COLORS[3]]
-            
-            # Create 4 subplots with manual positioning to avoid tight_layout issues
-            fig = self.figure
-            
-            # Manual subplot positioning [left, bottom, width, height]
-            subplot_height = 0.18  # Height of each subplot
-            subplot_width = 0.75   # Width of subplots
-            left_margin = 0.15     # Space for y-labels
-            bottom_start = 0.08    # Bottom margin
-            vertical_spacing = 0.02  # Space between subplots
-            
-            axes = []
-            for i in range(4):
-                # Calculate position (bottom subplot first, then stack upward)
-                bottom = bottom_start + i * (subplot_height + vertical_spacing)
-                ax = fig.add_axes([left_margin, bottom, subplot_width, subplot_height])
-                axes.append(ax)
-                
-                # Plot the channel data
-                ax.plot(time_seconds, channel_data[3-i], color=channel_colors[3-i], 
-                    linewidth=0.8, alpha=0.9)
-                
-                # Style each subplot
-                ax.set_ylabel(f'{channel_names[3-i]}\n(μV)', color='#ccc', fontsize=10, 
-                            rotation=0, ha='right', va='center')
-                ax.tick_params(colors='#ccc', labelsize=8)
-                ax.grid(True, linestyle='--', alpha=0.2, color='#555')
-                
-                # Set background
-                ax.set_facecolor('#2d2d2d')
-                for spine in ax.spines.values():
-                    spine.set_color('#555')
-                
-                # Only show x-axis label on bottom subplot
-                if i == 0:  # Bottom subplot
-                    ax.set_xlabel('Time (seconds)', color='#ccc', fontsize=10)
-                else:
-                    ax.tick_params(labelbottom=False)
-                    
-                # Share x-axis with bottom subplot for consistent scaling
-                if i > 0:
-                    ax.sharex(axes[0])
-            
-            # Add title manually positioned
-            fig.text(0.5, 0.95, f'Session EEG Data', 
-                    ha='center', va='top', color='#ccc', fontsize=12, weight='bold')
-            
-            self.canvas.draw()
-            
+            if duration_seconds > 10:
+                self.eeg_scrollbar.blockSignals(True)
+                self.eeg_scrollbar.setRange(0, int(duration_seconds - 10))
+                self.eeg_scrollbar.setPageStep(1)
+                self.eeg_scrollbar.setValue(0)
+                self.eeg_scrollbar.blockSignals(False)
+                self.eeg_scrollbar.show()
+            else:
+                self.eeg_scrollbar.hide()
+
+            self.update_eeg_graph_view()
+
         except Exception as e:
             print(f"Error generating EEG graph: {e}")
             import traceback
             traceback.print_exc()
-            self.figure.clear()
-            ax = self.figure.add_subplot(111)
-            ax.text(0.5, 0.5, f"Error loading EEG data: {str(e)}", 
-                    horizontalalignment='center', verticalalignment='center',
-                    transform=ax.transAxes, fontsize=10, color='#e74c3c')
-            ax.set_axis_off()
-            self.canvas.draw()
+            self.eeg_scrollbar.hide()
+            self.current_eeg_data = None
+    
+    def update_eeg_graph_view(self):
+        """Updates the EEG graph to show a 10-second window based on the scrollbar."""
+        if not self.current_eeg_data:
+            return
+
+        timestamps = self.current_eeg_data['timestamps']
+        channel_data = [
+            self.current_eeg_data['channel_0'], self.current_eeg_data['channel_1'],
+            self.current_eeg_data['channel_2'], self.current_eeg_data['channel_3']
+        ]
+        
+        start_time_session = timestamps[0]
+        window_start_sec = self.eeg_scrollbar.value() if self.eeg_scrollbar.isVisible() else 0
+        window_end_sec = window_start_sec + min(10, (timestamps[-1] - start_time_session))
+
+        time_seconds_full = np.array([(ts - start_time_session) for ts in timestamps])
+        
+        start_index = np.searchsorted(time_seconds_full, window_start_sec, side='left')
+        end_index = np.searchsorted(time_seconds_full, window_end_sec, side='right')
+
+        if start_index >= end_index:
+            return
+
+        time_seconds_window = time_seconds_full[start_index:end_index]
+        channel_data_window = [ch[start_index:end_index] for ch in channel_data]
+
+        self.figure.clear()
+        plt.style.use('dark_background')
+        self.figure.patch.set_facecolor('#2d2d2d')
+        
+        channel_names = ['TP9', 'AF7', 'AF8', 'TP10']
+        channel_colors = [NEUROFLOW_COLORS[0], NEUROFLOW_COLORS[1], 
+                        NEUROFLOW_COLORS[2], NEUROFLOW_COLORS[3]]
+        
+        fig = self.figure
+        subplot_height, subplot_width, left_margin, bottom_start, vertical_spacing = 0.18, 0.75, 0.15, 0.08, 0.02
+        axes = []
+        for i in range(4):
+            bottom = bottom_start + i * (subplot_height + vertical_spacing)
+            ax = fig.add_axes([left_margin, bottom, subplot_width, subplot_height])
+            axes.append(ax)
+            ax.plot(time_seconds_window, channel_data_window[3-i], color=channel_colors[3-i], linewidth=0.8, alpha=0.9)
+            ax.set_ylabel(f'{channel_names[3-i]}\n(μV)', color='#ccc', fontsize=10, rotation=0, ha='right', va='center')
+            ax.tick_params(colors='#ccc', labelsize=8)
+            ax.grid(True, linestyle='--', alpha=0.2, color='#555')
+            ax.set_facecolor('#2d2d2d')
+            for spine in ax.spines.values():
+                spine.set_color('#555')
+            
+            ax.set_xlim(window_start_sec, window_end_sec) # Set x-axis to the 10s window
+
+            if i == 0:
+                ax.set_xlabel('Time (seconds)', color='#ccc', fontsize=10)
+            else:
+                ax.tick_params(labelbottom=False)
+                if axes[0]: ax.sharex(axes[0])
+        
+        fig.text(0.5, 0.95, f'Session EEG Data', ha='center', va='top', color='#ccc', fontsize=12, weight='bold')
+        self.canvas.draw()
     
     def generate_brainwave_graph(self, session_id):
         """Generate brain wave activity visualization using real data"""

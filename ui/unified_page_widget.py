@@ -64,7 +64,6 @@ class UnifiedEEGPageWidget(QtWidgets.QWidget):
         self._setup_page_config()
         
         self.initUI()
-        
         self.signal_quality_validator = SignalQualityValidator()
         self.client = SimpleUDPClient(UNITY_IP, UNITY_OSC_PORT)
 

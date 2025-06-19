@@ -72,161 +72,6 @@ highcut = 30.0
 # Default model path - adjust as needed
 DEFAULT_MODEL_PATH = "dataset_results/gradient_boosting_model.joblib"
 
-class EEGProcessingDebugWindow(QtWidgets.QWidget):
-    """Debug window to visualize EEG processing in real-time"""
-    
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle('EEG Processing Debug - Raw vs Filtered')
-        self.setGeometry(200, 200, 1000, 600)
-        
-        layout = QtWidgets.QVBoxLayout(self)
-        
-        # Control buttons
-        controls = QtWidgets.QHBoxLayout()
-        
-        self.pause_button = QtWidgets.QPushButton("Pause")
-        self.pause_button.setCheckable(True)
-        controls.addWidget(self.pause_button)
-        
-        self.clear_button = QtWidgets.QPushButton("Clear")
-        controls.addWidget(self.clear_button)
-        
-        controls.addStretch()
-        layout.addLayout(controls)
-        
-        # Plot area
-        self.figure = Figure(figsize=(10, 6), dpi=100, facecolor='#2d2d2d')
-        self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
-        
-        # Data storage for plotting
-        self.max_samples = 1280  # 5 seconds at 256 Hz
-        self.raw_data = [[] for _ in range(4)]
-        self.filtered_data = [[] for _ in range(4)]
-        self.time_data = []
-        
-        self.setup_plots()
-        
-        # Apply dark theme
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #2d2d2d;
-                color: #ccc;
-            }
-            QPushButton {
-                background-color: #3a3a3a;
-                border: 1px solid #555;
-                padding: 8px 15px;
-                border-radius: 4px;
-            }
-            QPushButton:checked {
-                background-color: #5a5a5a;
-            }
-        """)
-        
-    def setup_plots(self):
-        """Setup the comparison plots"""
-        self.figure.clear()
-        plt.style.use('dark_background')
-        
-        # Create 4 subplots for raw vs filtered comparison
-        self.axes = []
-        channel_names = ['TP9', 'AF7', 'AF8', 'TP10']
-        colors = ["#6F72B3", "#9370DB", "#B3B6E6", "#33366B"]
-        
-        for i in range(4):
-            ax = self.figure.add_subplot(4, 1, i+1)
-            self.axes.append(ax)
-            
-            ax.set_ylabel(f'{channel_names[i]}\n(μV)', color='#ccc', fontsize=10, 
-                         rotation=0, ha='right', va='center')
-            ax.tick_params(colors='#ccc', labelsize=8)
-            ax.grid(True, linestyle='--', alpha=0.2, color='#555')
-            ax.set_facecolor('#2d2d2d')
-            
-            for spine in ax.spines.values():
-                spine.set_color('#555')
-                
-            if i == 3:  # Last subplot
-                ax.set_xlabel('Time (seconds)', color='#ccc', fontsize=10)
-            else:
-                ax.tick_params(labelbottom=False)
-        
-        self.figure.suptitle('EEG Processing Debug: Raw (light) vs Filtered (dark)', 
-                           color='#ccc', fontsize=12)
-        
-        # Initialize plot lines
-        self.raw_lines = []
-        self.filtered_lines = []
-        
-        for i, ax in enumerate(self.axes):
-            # Raw data (lighter color, thinner line)
-            raw_line, = ax.plot([], [], color=colors[i], alpha=0.6, linewidth=0.8, label='Raw')
-            self.raw_lines.append(raw_line)
-            
-            # Filtered data (darker color, thicker line)  
-            filt_line, = ax.plot([], [], color=colors[i], alpha=1.0, linewidth=1.2, label='Filtered')
-            self.filtered_lines.append(filt_line)
-            
-            ax.set_xlim(0, 5)  # 5 second window
-            ax.set_ylim(-100, 100)
-        
-        self.figure.tight_layout()
-        self.canvas.draw()
-    
-    def update_data(self, raw_window, filtered_window, sampling_rate):
-        """Update the debug plots with new data"""
-        if self.pause_button.isChecked():
-            return
-            
-        # Add new data
-        n_samples = raw_window.shape[1]
-        
-        # Create time array for this window
-        if self.time_data:
-            start_time = self.time_data[-1] + (1.0 / sampling_rate)
-        else:
-            start_time = 0.0
-            
-        new_times = [start_time + i/sampling_rate for i in range(n_samples)]
-        
-        # Add to storage
-        self.time_data.extend(new_times)
-        for ch in range(4):
-            self.raw_data[ch].extend(raw_window[ch, :].tolist())
-            self.filtered_data[ch].extend(filtered_window[ch, :].tolist())
-        
-        # Limit data size
-        if len(self.time_data) > self.max_samples:
-            excess = len(self.time_data) - self.max_samples
-            self.time_data = self.time_data[excess:]
-            for ch in range(4):
-                self.raw_data[ch] = self.raw_data[ch][excess:]
-                self.filtered_data[ch] = self.filtered_data[ch][excess:]
-        
-        # Update plots
-        if len(self.time_data) > 10:
-            for i in range(4):
-                self.raw_lines[i].set_data(self.time_data, self.raw_data[i])
-                self.filtered_lines[i].set_data(self.time_data, self.filtered_data[i])
-                
-                # Auto-scale
-                if self.raw_data[i] and self.filtered_data[i]:
-                    all_data = self.raw_data[i] + self.filtered_data[i]
-                    y_min, y_max = min(all_data), max(all_data)
-                    y_margin = max(5, (y_max - y_min) * 0.1)
-                    self.axes[i].set_ylim(y_min - y_margin, y_max + y_margin)
-            
-            # Update x-axis
-            if self.time_data:
-                x_min, x_max = self.time_data[0], self.time_data[-1]
-                for ax in self.axes:
-                    ax.set_xlim(x_min, x_max)
-        
-        self.canvas.draw()
-
-
 class HybridEEGClassifier:
     """
     Hybrid classifier that combines ML model prediction with band-power level detection
@@ -1145,9 +990,6 @@ class EEGProcessingWorker(QtCore.QObject):
         self.current_prediction = {
             'state': 'Unknown', 'level': 0, 'confidence': 0.0, 'smooth_value': 0.5
         }
-
-        self.debug_window = None
-        self.enable_debug_plotting = True  # Set to True to enable
         
         # State tracking with momentum
         self.state_momentum = 0.75
@@ -1260,13 +1102,6 @@ class EEGProcessingWorker(QtCore.QObject):
                 self.state_change_threshold = self._original_state_change_threshold
                 self.min_stable_count = self._original_min_stable_count
                 logger.info("TESTING MODE DISABLED - Restored normal stability requirements")
-
-    def show_debug_window(self):
-        """Show the debug plotting window"""
-        if not self.debug_window:
-            self.debug_window = EEGProcessingDebugWindow()
-        self.debug_window.show()
-        self.enable_debug_plotting = True
     
     def _get_accelerometer_data(self):
         """Get accelerometer data from appropriate source"""
@@ -1754,18 +1589,9 @@ class EEGProcessingWorker(QtCore.QObject):
             # Process if we have enough data
             if self.eeg_buffer.shape[1] >= self.nfft:
                 eeg_window = self.eeg_buffer[:, -self.nfft:]
-                raw_window_for_debug = eeg_window.copy()
             
                 filtered_window = self._filter_eeg_data(eeg_window)
                 current_metrics = self._calculate_band_powers(filtered_window)
-                
-                # DEBUG PLOTTING - ADD THIS
-                if self.enable_debug_plotting:
-                    self.debug_window = EEGProcessingDebugWindow()
-                    try:
-                        self.debug_window.update_data(raw_window_for_debug, filtered_window, self.sampling_rate)
-                    except Exception as debug_e:
-                        logger.warning(f"Debug plotting error: {debug_e}")
                 
                 if current_metrics:
                     current_metrics['eeg_window'] = filtered_window
@@ -1800,7 +1626,7 @@ class EEGProcessingWorker(QtCore.QObject):
                     self.current_prediction = smoothed_classification
                     
                     # ACCUMULATE ALL SESSION DATA
-                    self._accumulate_session_data(smoothed_classification, current_metrics, eeg_window)
+                    self._accumulate_session_data(smoothed_classification, current_metrics, filtered_window)
                     
                     # Prepare prediction data for UI feedback only
                     prediction_data = {
@@ -1918,7 +1744,7 @@ class EEGProcessingWorker(QtCore.QObject):
             error_msg = f"Database save error: {e}"
             raise Exception(error_msg)
 
-    def _accumulate_session_data(self, classification, current_metrics, eeg_window):
+    def _accumulate_session_data(self, classification, current_metrics, filtered_window):
         """Accumulate all session data for later database saving"""
         current_time = time.time()
         
@@ -1940,38 +1766,28 @@ class EEGProcessingWorker(QtCore.QObject):
         self.session_band_data["bt_ratio"].append(round(current_metrics['bt_ratio'], 3))
         self.session_band_data["timestamps"].append(current_time)
         
-        # Store FILTERED EEG data (fixed version)
-        if eeg_window.shape[1] >= self.nfft:
-            # 1. Apply filtering FIRST
-            filtered_window = self._filter_eeg_data(eeg_window)
+        # Store FILTERED EEG data
+        if filtered_window.shape[1] >= self.nfft:
+            # The window is now already filtered, so we can proceed directly.
             
-            # 2. Apply basic artifact rejection
-            artifact_mask = self._lenient_artifact_rejection(filtered_window)
-            if np.sum(artifact_mask) < 0.3 * filtered_window.shape[1]:
-                # Too many artifacts, skip this window
-                return
-            
-            # 3. Use only clean samples
-            clean_window = filtered_window[:, artifact_mask] if np.any(artifact_mask) else filtered_window
-            
-            # 4. Proper downsampling with anti-aliasing
+            # Proper downsampling with anti-aliasing
             downsample_factor = 4
-            if clean_window.shape[1] >= downsample_factor:
+            if filtered_window.shape[1] >= downsample_factor:
                 # Apply anti-aliasing filter before downsampling
                 from scipy.signal import decimate
                 try:
                     # Decimate properly handles anti-aliasing
-                    downsampled_eeg = np.zeros((4, clean_window.shape[1] // downsample_factor))
+                    downsampled_eeg = np.zeros((4, filtered_window.shape[1] // downsample_factor))
                     for ch in range(4):
-                        downsampled_eeg[ch, :] = decimate(clean_window[ch, :], downsample_factor, ftype='iir')
+                        downsampled_eeg[ch, :] = decimate(filtered_window[ch, :], downsample_factor, ftype='iir')
                 except:
                     # Fallback to simple method if decimate fails
-                    downsampled_indices = np.arange(0, clean_window.shape[1], downsample_factor)
-                    downsampled_eeg = clean_window[:, downsampled_indices]
+                    downsampled_indices = np.arange(0, filtered_window.shape[1], downsample_factor)
+                    downsampled_eeg = filtered_window[:, downsampled_indices]
             else:
-                downsampled_eeg = clean_window
+                downsampled_eeg = filtered_window
             
-            # 5. Store each sample with proper timing
+            # Store each sample with proper timing
             sample_interval = downsample_factor / self.sampling_rate
             for i in range(downsampled_eeg.shape[1]):
                 self.session_eeg_data["channel_0"].append(float(downsampled_eeg[0, i]))
